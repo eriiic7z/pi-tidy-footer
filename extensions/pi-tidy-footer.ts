@@ -10,6 +10,8 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
+const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
+
 /* ------------------------------------------------------------------ */
 /*  persistence                                                        */
 /* ------------------------------------------------------------------ */
@@ -26,6 +28,41 @@ function readPersistedEnabled(): boolean {
 	}
 }
 
+function readThresholds(): { warn: number; alert: number } {
+	try {
+		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+		let w = Number(raw?.balanceThresholdWarn);
+		let a = Number(raw?.balanceThresholdAlert);
+		if (!Number.isFinite(w) || !Number.isFinite(a) || w <= a) {
+			w = 30;
+			a = 10;
+		}
+		return { warn: w, alert: a };
+	} catch {
+		return { warn: 30, alert: 10 };
+	}
+}
+
+function writeThresholds(warn: number, alert: number): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({
+				...prev,
+				balanceThresholdWarn: warn,
+				balanceThresholdAlert: alert,
+			}),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
 function writePersistedEnabled(enabled: boolean): void {
 	try {
 		mkdirSync(STATE_DIR, { recursive: true });
@@ -33,6 +70,49 @@ function writePersistedEnabled(enabled: boolean): void {
 	} catch {
 		/* no-op */
 	}
+}
+
+function getApiKey(provider: string): string | undefined {
+	try {
+		return (JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as any)[provider]?.key;
+	} catch {
+		return undefined;
+	}
+}
+
+async function fetchBalance(
+	provider: string,
+	key: string,
+): Promise<string | undefined> {
+	const url =
+		provider === "deepseek"
+			? "https://api.deepseek.com/user/balance"
+			: provider === "moonshotai-cn"
+				? "https://api.moonshot.cn/v1/users/me/balance"
+				: null;
+	if (!url) return undefined;
+	const resp = await fetch(url, {
+		headers: { Authorization: `Bearer ${key}` },
+	});
+	if (!resp.ok) return undefined;
+	const data = (await resp.json()) as any;
+	if (provider === "deepseek") {
+		return parseFloat(data?.balance_infos?.[0]?.total_balance).toFixed(2);
+	}
+	if (provider === "moonshotai-cn") {
+		const bal = data?.data;
+		const cash = Number.parseFloat(bal?.cash_balance ?? "");
+		const voucher = Number.parseFloat(bal?.voucher_balance ?? "");
+		const available = Number.parseFloat(bal?.available_balance ?? "");
+		const raw =
+			Number.isNaN(cash) || Number.isNaN(voucher)
+				? Number.isNaN(available)
+					? undefined
+					: available
+				: cash + voucher;
+		return raw === undefined ? undefined : raw.toFixed(2);
+	}
+	return undefined;
 }
 
 /* ------------------------------------------------------------------ */
@@ -113,13 +193,14 @@ function parseGitStatusTokens(stdout: string): string {
 
 interface ToolActivityState {
 	active: Map<string, number>;
-	lastCompleted: string | undefined;
-	streaming: boolean;
+	minDisplayQueue: string[];
+	minDisplayTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface LiveHooks {
 	requestRender: (() => void) | undefined;
 	refreshGit: (() => void) | undefined;
+	refreshBalance: (() => void) | undefined;
 }
 
 function formatToolActivity(state: ToolActivityState): string {
@@ -134,8 +215,6 @@ function formatToolActivity(state: ToolActivityState): string {
 					: "";
 		return `⚙ ${name}${suffix}`;
 	}
-	if (state.streaming) return "thinking";
-	if (state.lastCompleted) return `✓ ${state.lastCompleted}`;
 	return "";
 }
 
@@ -150,12 +229,18 @@ function makeFooter(
 	fd: any,
 	toolState: ToolActivityState,
 	live: LiveHooks,
+	thresholds: { warn: number; alert: number },
 ) {
 	let disposed = false;
 	let gitTokens = "";
 	let gitInFlight = false;
 	let gitQueued = false;
 	let gitDebounce: ReturnType<typeof setTimeout> | undefined;
+	let balanceText = "";
+	let balanceProvider = "";
+	let balanceStale = false;
+	let balanceLastFetch = 0;
+	let balanceInFlight = false;
 
 	const runGitStatus = () => {
 		if (disposed) return;
@@ -213,14 +298,73 @@ function makeFooter(
 	live.refreshGit = refreshGit;
 	runGitStatus();
 
+	const runBalance = () => {
+		if (disposed) return;
+		const provider = ctx.model?.provider;
+		if (provider !== "deepseek" && provider !== "moonshotai-cn") {
+			balanceText = "";
+			balanceProvider = "";
+			balanceStale = false;
+			tui.requestRender();
+			return;
+		}
+		const now = Date.now();
+		if (
+			balanceLastFetch > 0 &&
+			now - balanceLastFetch < 30_000 &&
+			balanceProvider === provider
+		) {
+			// still fresh
+			return;
+		}
+		balanceProvider = provider;
+		balanceLastFetch = now;
+		if (balanceInFlight) return;
+		const key = getApiKey(provider);
+		if (!key) return;
+		balanceInFlight = true;
+		void (async () => {
+			try {
+				const value = await fetchBalance(provider, key);
+				if (disposed || ctx.model?.provider !== provider) {
+					balanceText = "";
+					balanceProvider = "";
+				} else if (value !== undefined) {
+					balanceText = `¤¥${value}`;
+					balanceProvider = provider;
+					balanceStale = false;
+					balanceLastFetch = Date.now();
+				} else {
+					balanceText = "";
+					balanceProvider = "";
+				}
+			} catch {
+				if (!disposed && ctx.model?.provider === provider) {
+					if (balanceText) balanceStale = true;
+					else {
+						balanceText = "";
+						balanceProvider = "";
+					}
+				}
+			} finally {
+				balanceInFlight = false;
+				if (!disposed) tui.requestRender();
+			}
+		})();
+	};
+	live.refreshBalance = runBalance;
+	if (!balanceText) runBalance();
+
 	return {
 		dispose() {
 			disposed = true;
 			unsub();
 			clearInterval(gitInterval);
 			if (gitDebounce) clearTimeout(gitDebounce);
+			if (gitDebounce) clearTimeout(gitDebounce);
 			live.requestRender = undefined;
 			live.refreshGit = undefined;
+			live.refreshBalance = undefined;
 		},
 		render(width: number): string[] {
 			const session = ctx.sessionManager;
@@ -301,15 +445,24 @@ function makeFooter(
 				right = tl === "off" ? `${mName} • thinking off` : `${mName} • ${tl}`;
 			}
 			const toolText = formatToolActivity(toolState);
-			const toolColor =
-				toolState.active.size > 0
-					? "accent"
-					: toolState.streaming
-						? "dim"
-						: "success";
+			const toolColor = "accent";
 			const toolSeg = toolText ? `${theme.fg(toolColor, toolText)}  ` : "";
+			const balanceSeg = (() => {
+				if (!balanceText || ctx.model?.provider !== balanceProvider) return "";
+				const num = Number.parseFloat(balanceText.slice(2));
+				const color = Number.isNaN(num)
+					? "dim"
+					: num < thresholds.alert
+						? "error"
+						: num < thresholds.warn
+							? "warning"
+							: "dim";
+				return `  ${theme.fg(color, balanceText + (balanceStale ? "?" : ""))}`;
+			})();
 			const rw =
-				visibleWidth(right) + (toolText ? visibleWidth(toolText) + 2 : 0);
+				visibleWidth(right) +
+				(toolText ? visibleWidth(toolText) + 2 : 0) +
+				visibleWidth(balanceSeg);
 
 			const pad = width - lw - rw;
 			let line2: string;
@@ -318,7 +471,8 @@ function makeFooter(
 					theme.fg("dim", left) +
 					" ".repeat(pad) +
 					toolSeg +
-					theme.fg("dim", right);
+					theme.fg("dim", right) +
+					balanceSeg;
 			} else if (width - lw - 2 > 0) {
 				line2 =
 					theme.fg("dim", left) +
@@ -326,7 +480,7 @@ function makeFooter(
 						"dim",
 						"  " +
 							truncateToWidth(
-								(toolText ? `${toolText}  ` : "") + right,
+								(toolText ? `${toolText}  ` : "") + right + balanceSeg,
 								width - lw - 2,
 								"",
 							),
@@ -380,14 +534,19 @@ function makeFooter(
 export default function (pi: ExtensionAPI) {
 	const toolState: ToolActivityState = {
 		active: new Map(),
-		lastCompleted: undefined,
-		streaming: false,
+		minDisplayQueue: [],
+		minDisplayTimer: undefined,
 	};
-	const live: LiveHooks = { requestRender: undefined, refreshGit: undefined };
+	const live: LiveHooks = {
+		requestRender: undefined,
+		refreshGit: undefined,
+		refreshBalance: undefined,
+	};
 
 	function applyFooter(ctx: any) {
+		const thresholds = readThresholds();
 		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
-			makeFooter(ctx, tui, theme, fd, toolState, live),
+			makeFooter(ctx, tui, theme, fd, toolState, live, thresholds),
 		);
 	}
 
@@ -396,8 +555,9 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		enabled = readPersistedEnabled();
 		toolState.active.clear();
-		toolState.lastCompleted = undefined;
-		toolState.streaming = false;
+		toolState.minDisplayQueue.length = 0;
+		if (toolState.minDisplayTimer) clearTimeout(toolState.minDisplayTimer);
+		toolState.minDisplayTimer = undefined;
 		if (enabled) applyFooter(ctx);
 	});
 
@@ -413,20 +573,69 @@ export default function (pi: ExtensionAPI) {
 		const n = toolState.active.get(event.toolName) ?? 0;
 		if (n <= 1) toolState.active.delete(event.toolName);
 		else toolState.active.set(event.toolName, n - 1);
-		toolState.lastCompleted = event.toolName;
+		// minimum 150ms display so fast tools don't flicker
+		if (!toolState.active.has(event.toolName)) {
+			toolState.minDisplayQueue.push(event.toolName);
+			if (!toolState.minDisplayTimer) {
+				toolState.minDisplayTimer = setTimeout(() => {
+					toolState.minDisplayQueue = [];
+					toolState.minDisplayTimer = undefined;
+					live.requestRender?.();
+				}, 150);
+			}
+		} else {
+			toolState.minDisplayQueue = toolState.minDisplayQueue.filter(
+				(q) => q !== event.toolName,
+			);
+		}
 		live.requestRender?.();
 		live.refreshGit?.();
 	});
 
 	pi.on("agent_start", () => {
-		toolState.streaming = true;
 		live.requestRender?.();
 	});
 
 	pi.on("agent_end", () => {
-		toolState.streaming = false;
 		live.requestRender?.();
 		live.refreshGit?.();
+	});
+
+	pi.on("model_select", () => {
+		live.refreshBalance?.();
+	});
+
+	pi.on("turn_end", () => {
+		live.refreshBalance?.();
+	});
+
+	pi.registerCommand("bt", {
+		description:
+			"Set balance thresholds: warn (yellow) / alert (red), warn > alert",
+		handler: async (args: string, ctx: any) => {
+			const parts = args.trim().split(/\s+/);
+			const warn = Number(parts[0]);
+			const alert = Number(parts[1]);
+			if (
+				parts.length !== 2 ||
+				!Number.isFinite(warn) ||
+				!Number.isFinite(alert) ||
+				warn <= alert
+			) {
+				ctx.ui.notify(
+					"Usage: /bt <warn> <alert> (warn > alert). Default: 30 10",
+					"error",
+				);
+				return;
+			}
+			writeThresholds(warn, alert);
+			// re-apply footer with fresh thresholds
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				`Balance thresholds: yellow < ${warn}, red < ${alert}`,
+				"info",
+			);
+		},
 	});
 
 	pi.registerCommand("tf", {

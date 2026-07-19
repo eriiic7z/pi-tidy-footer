@@ -1,6 +1,6 @@
 {
   "name": "pi-tidy-footer",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Tidy footer for Pi coding agent — keeps the built-in footer layout with micro-adjustments",
   "type": "module",
   "main": "extensions/pi-tidy-footer.ts",

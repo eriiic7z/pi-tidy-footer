@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0] — 2026-07-19
+
+### Added / 新增
+
+- 账户余额：第 2 行模型名后显示当前 provider 的余额（`¤¥` 格式，支持 DeepSeek 和 Kimi），每个 turn 结束后自动刷新（30s 冷却）；余额低于警告线变黄、低于红线变红 / Account balance after the model name on line 2 (`¤¥` format, DeepSeek and Kimi), auto-refreshed after each turn (30s cooldown); yellow under warn threshold, red under alert threshold
+- `/bt <warn> <alert>` 命令：自定义余额黄/红阈值，持久化存储，warn 必须大于 alert / `/bt <warn> <alert>` command to set custom yellow/red balance thresholds, persisted, warn > alert required
+
+### Changed / 变更
+
+- 工具活动指示精简为仅显示运行中的工具（`⚙`），移除 thinking 和 ✓ 状态；快工具至少保留 150ms 驻留 / Tool activity indicator simplified to show only the running tool (`⚙`), removed thinking and ✓ states; fast tools held at least 150ms
+
+### Fixed / 修复
+
+- 工具名称使用统一椭圆⚙️（适配 Emoji 变体） / Replace tool icon with unified ⚙️ symbol
+
 ## [0.2.0] — 2026-07-19
 
 ### Added / 新增
