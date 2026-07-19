@@ -31,7 +31,7 @@ function writePersistedEnabled(enabled: boolean): void {
 		mkdirSync(STATE_DIR, { recursive: true });
 		writeFileSync(STATE_FILE, JSON.stringify({ enabled }), "utf-8");
 	} catch {
-		/* no‑op */
+		/* no-op */
 	}
 }
 
@@ -60,17 +60,170 @@ function fmtCwd(cwd: string, home: string | undefined): string {
 }
 
 /* ------------------------------------------------------------------ */
+/*  git status tokens (feature ported from pi-statusline, plain style) */
+/* ------------------------------------------------------------------ */
+
+function parseGitStatusTokens(stdout: string): string {
+	let ahead = 0,
+		behind = 0,
+		staged = 0,
+		modified = 0,
+		untracked = 0,
+		conflicts = 0;
+	for (const line of stdout.split("\n")) {
+		if (!line) continue;
+		if (line.startsWith("## ")) {
+			const a = line.match(/\bahead (\d+)/);
+			const b = line.match(/\bbehind (\d+)/);
+			ahead = a ? Number(a[1]) : 0;
+			behind = b ? Number(b[1]) : 0;
+			continue;
+		}
+		const x = line[0] ?? " ";
+		const y = line[1] ?? " ";
+		if (x === "?" && y === "?") {
+			untracked++;
+			continue;
+		}
+		if (
+			(x === "D" && y === "D") ||
+			(x === "A" && y === "A") ||
+			x === "U" ||
+			y === "U"
+		) {
+			conflicts++;
+			continue;
+		}
+		if (x !== " " && x !== "?" && x !== "!") staged++;
+		if (y !== " " && y !== "?" && y !== "!") modified++;
+	}
+	const parts: string[] = [];
+	if (ahead) parts.push(`⇡${ahead}`);
+	if (behind) parts.push(`⇣${behind}`);
+	if (staged) parts.push(`+${staged}`);
+	if (modified) parts.push(`~${modified}`);
+	if (untracked) parts.push(`?${untracked}`);
+	if (conflicts) parts.push(`!${conflicts}`);
+	return parts.join(" ");
+}
+
+/* ------------------------------------------------------------------ */
+/*  tool activity                                                      */
+/* ------------------------------------------------------------------ */
+
+interface ToolActivityState {
+	active: Map<string, number>;
+	lastCompleted: string | undefined;
+	streaming: boolean;
+}
+
+interface LiveHooks {
+	requestRender: (() => void) | undefined;
+	refreshGit: (() => void) | undefined;
+}
+
+function formatToolActivity(state: ToolActivityState): string {
+	const active = [...state.active.entries()];
+	if (active.length > 0) {
+		const [name, count] = active[0] ?? ["tool", 1];
+		const suffix =
+			count > 1
+				? `×${count}`
+				: active.length > 1
+					? `+${active.length - 1}`
+					: "";
+		return `⚙ ${name}${suffix}`;
+	}
+	if (state.streaming) return "thinking";
+	if (state.lastCompleted) return `✓ ${state.lastCompleted}`;
+	return "";
+}
+
+/* ------------------------------------------------------------------ */
 /*  footer factory                                                     */
 /* ------------------------------------------------------------------ */
 
-function makeFooter(ctx: any, tui: any, theme: any, fd: any) {
-	const unsub = fd.onBranchChange(() => tui.requestRender());
+function makeFooter(
+	ctx: any,
+	tui: any,
+	theme: any,
+	fd: any,
+	toolState: ToolActivityState,
+	live: LiveHooks,
+) {
+	let disposed = false;
+	let gitTokens = "";
+	let gitInFlight = false;
+	let gitQueued = false;
+	let gitDebounce: ReturnType<typeof setTimeout> | undefined;
+
+	const runGitStatus = () => {
+		if (disposed) return;
+		if (gitInFlight) {
+			gitQueued = true;
+			return;
+		}
+		gitInFlight = true;
+		void (async () => {
+			try {
+				const result = await ctx.exec(
+					"git",
+					[
+						"--no-optional-locks",
+						"status",
+						"--porcelain=v1",
+						"--branch",
+						"--untracked-files=normal",
+					],
+					{ cwd: ctx.sessionManager.getCwd(), timeout: 3000 },
+				);
+				gitTokens =
+					result.code === 0 && !result.killed
+						? parseGitStatusTokens(result.stdout)
+						: "";
+			} catch {
+				gitTokens = "";
+			} finally {
+				gitInFlight = false;
+				if (!disposed) tui.requestRender();
+				if (gitQueued) {
+					gitQueued = false;
+					runGitStatus();
+				}
+			}
+		})();
+	};
+
+	const refreshGit = () => {
+		if (disposed) return;
+		if (gitDebounce) clearTimeout(gitDebounce);
+		gitDebounce = setTimeout(() => {
+			gitDebounce = undefined;
+			runGitStatus();
+		}, 250);
+	};
+
+	const unsub = fd.onBranchChange(() => {
+		gitTokens = "";
+		refreshGit();
+		tui.requestRender();
+	});
+	const gitInterval = setInterval(runGitStatus, 30000);
+	live.requestRender = () => tui.requestRender();
+	live.refreshGit = refreshGit;
+	runGitStatus();
+
 	return {
-		dispose: unsub,
+		dispose() {
+			disposed = true;
+			unsub();
+			clearInterval(gitInterval);
+			if (gitDebounce) clearTimeout(gitDebounce);
+			live.requestRender = undefined;
+			live.refreshGit = undefined;
+		},
 		render(width: number): string[] {
 			const session = ctx.sessionManager;
-			const m = ctx.model;
-
 			/* token stats — cost intentionally omitted */
 			let inp = 0,
 				out = 0,
@@ -93,7 +246,7 @@ function makeFooter(ctx: any, tui: any, theme: any, fd: any) {
 
 			/* context usage */
 			const cu = ctx.getContextUsage();
-			const cw2 = cu?.contextWindow ?? m?.contextWindow ?? 0;
+			const cw2 = cu?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 			const pct = cu?.percent ?? 0;
 			const pctStr = cu?.percent !== null ? pct.toFixed(1) : "?";
 
@@ -102,8 +255,11 @@ function makeFooter(ctx: any, tui: any, theme: any, fd: any) {
 				session.getCwd(),
 				process.env.HOME || process.env.USERPROFILE,
 			);
-			const branch = fd.getGitBranch();
-			if (branch) pwd = `${pwd} (${branch})`;
+			const gitBranch = fd.getGitBranch();
+			if (gitBranch)
+				pwd = gitTokens
+					? `${pwd} (${gitBranch} ${gitTokens})`
+					: `${pwd} (${gitBranch})`;
 			const sname = session.getSessionName();
 			if (sname) pwd = `${pwd} • ${sname}`;
 
@@ -128,43 +284,89 @@ function makeFooter(ctx: any, tui: any, theme: any, fd: any) {
 			if (lw > width) left = truncateToWidth(left, width, "...");
 			lw = visibleWidth(left);
 
-			/* model / thinking */
-			const mName = m?.id || "no-model";
+			/* model / thinking — get thinking level from session entries (mirrors native footer) */
+			const mName = ctx.model?.id || "no-model";
 			let right = mName;
-			if (m?.reasoning) {
-				const tl = m?.thinkingLevel || "off";
+			if (ctx.model?.reasoning) {
+				let tl = "off";
+				// Walk session branch backwards for most recent thinking_level_change
+				const branch = session.getBranch();
+				for (let i = branch.length - 1; i >= 0; i--) {
+					const e = branch[i];
+					if (e.type === "thinking_level_change") {
+						tl = (e as any).thinkingLevel || "off";
+						break;
+					}
+				}
 				right = tl === "off" ? `${mName} • thinking off` : `${mName} • ${tl}`;
 			}
-			const rw = visibleWidth(right);
+			const toolText = formatToolActivity(toolState);
+			const toolColor =
+				toolState.active.size > 0
+					? "accent"
+					: toolState.streaming
+						? "dim"
+						: "success";
+			const toolSeg = toolText ? `${theme.fg(toolColor, toolText)}  ` : "";
+			const rw =
+				visibleWidth(right) + (toolText ? visibleWidth(toolText) + 2 : 0);
 
 			const pad = width - lw - rw;
-			const statsLine =
-				pad >= 0
-					? left + " ".repeat(pad) + right
-					: width - lw - 2 > 0
-						? left + "  " + truncateToWidth(right, width - lw - 2, "")
-						: left;
+			let line2: string;
+			if (pad >= 0) {
+				line2 =
+					theme.fg("dim", left) +
+					" ".repeat(pad) +
+					toolSeg +
+					theme.fg("dim", right);
+			} else if (width - lw - 2 > 0) {
+				line2 =
+					theme.fg("dim", left) +
+					theme.fg(
+						"dim",
+						"  " +
+							truncateToWidth(
+								(toolText ? `${toolText}  ` : "") + right,
+								width - lw - 2,
+								"",
+							),
+					);
+			} else {
+				line2 = theme.fg("dim", left);
+			}
 
 			/* extension statuses */
 			const extItems: string[] = [];
 			const raw = fd.getExtensionStatuses();
+			let mcpRgb = ""; // capture original MCP accent colour so theme changes work
 			if (raw.size > 0) {
 				const sorted = Array.from(raw.entries())
 					.sort(([a], [b]) => (a as string).localeCompare(b as string))
-					.map(([, v]) => (v as string).trim())
+					.map(([k, v]) => (v as string).trim())
 					.filter(Boolean);
 				extItems.push(...sorted);
 			}
 
+			// Extract original MCP accent RGB from the raw text before we strip colours
+			const rawMcp = raw.get("mcp");
+			if (rawMcp) {
+				const m = (rawMcp as string).match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
+				if (m) mcpRgb = `\x1b[38;2;${m[1]};${m[2]};${m[3]}m`;
+			}
+
 			const lines: string[] = [
 				truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")),
-				theme.fg("dim", statsLine.slice(0, lw)) +
-					theme.fg("dim", statsLine.slice(lw)),
+				line2,
 			];
-			if (extItems.length > 0)
-				lines.push(
-					truncateToWidth(extItems.join(" "), width, theme.fg("dim", "...")),
+			if (extItems.length > 0) {
+				let statusLine = extItems.join(" ");
+				// Rewrite MCP: prefix with dim colour, reset after the colon
+				statusLine = statusLine.replace(
+					/MCP:/,
+					`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
 				);
+				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+			}
 
 			return lines;
 		},
@@ -176,9 +378,16 @@ function makeFooter(ctx: any, tui: any, theme: any, fd: any) {
 /* ------------------------------------------------------------------ */
 
 export default function (pi: ExtensionAPI) {
+	const toolState: ToolActivityState = {
+		active: new Map(),
+		lastCompleted: undefined,
+		streaming: false,
+	};
+	const live: LiveHooks = { requestRender: undefined, refreshGit: undefined };
+
 	function applyFooter(ctx: any) {
 		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
-			makeFooter(ctx, tui, theme, fd),
+			makeFooter(ctx, tui, theme, fd, toolState, live),
 		);
 	}
 
@@ -186,11 +395,42 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		enabled = readPersistedEnabled();
+		toolState.active.clear();
+		toolState.lastCompleted = undefined;
+		toolState.streaming = false;
 		if (enabled) applyFooter(ctx);
 	});
 
+	pi.on("tool_execution_start", (event: any) => {
+		toolState.active.set(
+			event.toolName,
+			(toolState.active.get(event.toolName) ?? 0) + 1,
+		);
+		live.requestRender?.();
+	});
+
+	pi.on("tool_execution_end", (event: any) => {
+		const n = toolState.active.get(event.toolName) ?? 0;
+		if (n <= 1) toolState.active.delete(event.toolName);
+		else toolState.active.set(event.toolName, n - 1);
+		toolState.lastCompleted = event.toolName;
+		live.requestRender?.();
+		live.refreshGit?.();
+	});
+
+	pi.on("agent_start", () => {
+		toolState.streaming = true;
+		live.requestRender?.();
+	});
+
+	pi.on("agent_end", () => {
+		toolState.streaming = false;
+		live.requestRender?.();
+		live.refreshGit?.();
+	});
+
 	pi.registerCommand("tf", {
-		description: "Toggle cost‑free footer on / off",
+		description: "Toggle pi-tidy-footer on / off",
 		handler: async (_args: string, ctx: any) => {
 			enabled = !enabled;
 			writePersistedEnabled(enabled);
