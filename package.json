@@ -1,13 +1,23 @@
 {
   "name": "pi-tidy-footer",
   "version": "0.3.0",
-  "description": "Tidy footer for Pi coding agent — keeps the built-in footer layout with micro-adjustments",
+  "description": "Tidy footer for Pi coding agent — preserves the built-in footer layout, with micro-adjustments and new features",
   "type": "module",
   "main": "extensions/pi-tidy-footer.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eriiic7z/pi-tidy-footer.git"
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": ["./extensions/pi-tidy-footer.ts"]
   },
-  "keywords": ["pi-package", "pi-extension"],
-  "author": "ericzhao",
-  "private": true
+  "keywords": ["pi-package", "pi-extension", "extension"],
+  "author": "eriiic7z"
 }
