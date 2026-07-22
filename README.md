@@ -2,29 +2,29 @@
 
 [中文](#中文)
 
-Tidy Pi footer - preserves the built-in footer layout, with micro-adjustments and new features. Removes per-session cost ($), adds git status tokens, a tool activity indicator, and account balance, with persistent toggle state across sessions.
+Tidy footer for Pi coding agent — native layout, layered with new features: extension sort order, token balance display (color-coded warnings with configurable thresholds), git status tokens, and tool activity indicators; minor display tweaks for selected third-party extensions, keeping it clean.
 
 ## Install
 
 ```bash
-# Link to Pi extensions folder
-ln -s $(pwd)/extensions/pi-tidy-footer.ts ~/.pi/agent/extensions/pi-tidy-footer.ts
+pi install npm:pi-tidy-footer
 ```
 
 ## Features
 
-- **Hide per-session cost** — Removes `$0.604` from the left stats area, keeping it token-focused
+- **Account balance** — Shows DeepSeek or Kimi account balance after the model name (`¤¥` format), yellow below warn threshold, red below alert threshold, both configurable
+- **Extension sort order** — Custom sort order for extension statuses, persisted across sessions; run empty command to view the current order prompt
 - **Git status tokens** — Repo state next to the branch name: `⇡` ahead, `⇣` behind, `+` staged, `~` modified, `?` untracked, `!` conflicts; hidden when clean
 - **Tool activity indicator** — Shows the running tool (highlighted) before the model name with brief hold for fast tools; hidden when idle
-- **Account balance** — Shows DeepSeek or Kimi account balance after the model name (`¤¥` format), yellow under warn threshold, red under alert threshold
-- **Thinking level** — Correctly follows Shift+Tab
-- **Persistent state** — `/tf` toggle state persists across restarts
-- **Faithful to native** — Everything else (model, token stats, context %, git branch, extension statuses) stays untouched
-- **One-key toggle** — `/tf` toggles back to the original footer anytime
+- **Hide per-session cost** — Removes `$0.604` from the left stats area, keeping it token-focused
+- **Toggle & persistence** — `/tf` toggles back to the original footer anytime; all settings survive restarts
+- **Mostly native** — Everything else (model, token stats, context %, git branch) kept intact
 
-## Tweaks to other extensions
+## Display tweaks for other extensions
 
 - **pi-mcp-adapter** — Dimmed the `MCP:` label while preserving its original accent color, keeping the status line visually coherent across theme changes
+- **ponytail** — Removed ⚡ emoji from status, level text lowercased, 🐴 emoji kept
+- **caveman** — Label capitalised to `Caveman:`, level text lowercased
 
 ## Commands
 
@@ -32,34 +32,35 @@ ln -s $(pwd)/extensions/pi-tidy-footer.ts ~/.pi/agent/extensions/pi-tidy-footer.
 | --- | --- |
 | `/tf` | Toggle pi-tidy-footer (on/off) |
 | `/bt <warn> <alert>` | Set balance yellow/red thresholds (warn > alert required) |
+| `/se` | Show or set extension status sort order |
 
 ---
 
 ## 中文
 
-整洁的 Pi 页脚 — 保留内置页脚布局，含微调与新功能。去除会话费用 ($) 显示，增加 Git 状态标记、工具活动指示与账户余额，开关状态跨会话持久化。
+为 Pi coding agent 打造的整洁页脚 — 沿用原生布局，叠加了新的功能：插件自定义排序、token 余额显示（颜色警告、自定义警告阈值）、Git 状态标记、工具活动指示；对部分第三方插件进行名称显示微调，保持简洁。
 
 ## 安装
 
 ```bash
-# 链接到 Pi 扩展目录
-ln -s $(pwd)/extensions/pi-tidy-footer.ts ~/.pi/agent/extensions/pi-tidy-footer.ts
+pi install npm:pi-tidy-footer
 ```
 
 ## 功能
 
-- **去除会话费用显示** — 从左侧统计模块移除 `$0.604`，让统计专注 token
+- **账户余额** — 模型名后显示 DeepSeek / Kimi 账户余额（`¤¥` 格式），低于预警值（warn）变黄，低于警报值（alert）变红，阈值可自定义
+- **插件自定义排序** — 扩展状态按自定义顺序排列，持久化存储；可使用空命令查看排序字段提示
 - **Git 状态标记** — 分支名旁显示仓库状态：`⇡` 领先、`⇣` 落后、`+` 已暂存、`~` 已修改、`?` 未跟踪、`!` 冲突；干净仓库不显示
 - **工具活动指示** — 模型名前实时显示正在运行的工具（高亮），快工具至少有短暂停留；空闲时不显示
-- **账户余额** — 模型名后显示 DeepSeek / Kimi 账户余额（`¤¥` 格式），低于警告线变黄、低于红线变红
-- **思考级别跟随** — thinking level 正确跟随 Shift+Tab 切换
-- **跨会话记忆** — `/tf` 的状态保存在本地文件中，重启 Pi 后保持不变
-- **保持原样** — 其余所有内置页脚信息（模型、Token 统计、上下文百分比、Git 分支、扩展状态）完全不动
-- **一键切换** — `/tf` 随时开关，秒切回原始页脚
+- **去除会话费用显示** — 从左侧统计模块移除 `$0.604`，让统计专注 token
+- **开关与持久化** — `/tf` 随时切回原始页脚；所有设置重启后保持不变
+- **基本保留原生样式** — 其余所有内置页脚信息（模型、Token 统计、上下文百分比、Git 分支）保持不变
 
-## 其他扩展微调
+## 其他扩展的显示微调
 
 - **pi-mcp-adapter** — `MCP:` 标签置灰、保留原始强调色值，使状态行在不同主题下保持视觉协调
+- **ponytail** — 状态中移除 ⚡ 符号，级别字母全小写，🐴 符号保留
+- **caveman** — 标签首字母大写为 `Caveman:`，级别字母全小写
 
 ## 命令
 
@@ -67,3 +68,4 @@ ln -s $(pwd)/extensions/pi-tidy-footer.ts ~/.pi/agent/extensions/pi-tidy-footer.
 | --- | --- |
 | `/tf` | 切换 pi-tidy-footer 页脚（开/关） |
 | `/bt <warn> <alert>` | 设置余额黄/红阈值（warn > alert） |
+| `/se` | 查看或设置扩展状态排列顺序 |
