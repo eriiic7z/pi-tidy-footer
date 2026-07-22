@@ -2,6 +2,28 @@
 
 [中文](#中文)
 
+## [0.4.0] - 2026-07-22
+
+### Added
+
+- `/se` command: show or set extension status sort order, persisted across sessions
+- Extension statuses now sorted by user-defined order instead of alphabetically; unlisted extensions appear at the end
+
+### Changed
+
+- Ponytail and Caveman status formatting switched from regex reconstruction to replace-based approach, preserving native colours
+- Ponytail status: removed ⚡ emoji, level text lowercased, 🐴 emoji kept
+- Caveman status: label capitalised to `Caveman:`, level text lowercased
+
+### Fixed
+
+- `writePersistedEnabled` no longer overwrites other state keys (balance thresholds, extension order)
+- Duplicate `clearTimeout` call in `dispose()` removed
+- Unreachable fallback in `formatToolActivity` removed
+- `!== null` → `!= null` in context usage check (handles undefined correctly)
+- `fetchBalance` for DeepSeek: added null guard before `parseFloat` to avoid implicit exception handling
+- Removed redundant `existsSync` calls in `readPersistedEnabled` and `readExtensionOrder`
+
 ## [0.3.0] — 2026-07-19
 
 ### Added
@@ -40,6 +62,28 @@
 ---
 
 ## 中文
+
+## [0.4.0] - 2026-07-22
+
+### 新增
+
+- `/se` 命令：查看或设置扩展状态排序，持久化存储
+- 扩展状态按用户自定义顺序排列，未列出的扩展自动排至末尾
+
+### 变更
+
+- Ponytail 和 Caveman 状态格式化从正则重组改为 replace 方式，保留原生颜色
+- Ponytail 状态：移除 ⚡ 符号，级别字母全小写，🐴 符号保留
+- Caveman 状态：标签首字母大写为 `Caveman:`，级别字母全小写
+
+### 修复
+
+- `writePersistedEnabled` 不再覆盖其他状态键（余额阈值、扩展顺序）
+- 删除 `dispose()` 中的重复 `clearTimeout` 调用
+- 删除 `formatToolActivity` 中不可达的兜底逻辑
+- 上下文用量检查 `!== null` → `!= null`（正确处置 undefined）
+- DeepSeek 余额查询：`parseFloat` 前添加空值保护，避免隐式依赖异常流
+- 删除 `readPersistedEnabled` 和 `readExtensionOrder` 中的冗余 `existsSync` 调用
 
 ## [0.3.0] — 2026-07-19
 

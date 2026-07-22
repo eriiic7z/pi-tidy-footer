@@ -7,7 +7,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
@@ -21,7 +20,6 @@ const STATE_FILE = join(STATE_DIR, "pi-tidy-footer-state.json");
 
 function readPersistedEnabled(): boolean {
 	try {
-		if (!existsSync(STATE_FILE)) return false;
 		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).enabled === true;
 	} catch {
 		return false;
@@ -65,8 +63,37 @@ function writeThresholds(warn: number, alert: number): void {
 
 function writePersistedEnabled(enabled: boolean): void {
 	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
 		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(STATE_FILE, JSON.stringify({ enabled }), "utf-8");
+		writeFileSync(STATE_FILE, JSON.stringify({ ...prev, enabled }), "utf-8");
+	} catch {
+		/* no-op */
+	}
+}
+
+function readExtensionOrder(): string[] {
+	const fallback = ["caveman", "ponytail", "mcp", "pi-lens-lsp"];
+	try {
+		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+		return Array.isArray(raw?.extensionOrder) ? raw.extensionOrder : fallback;
+	} catch {
+		return fallback;
+	}
+}
+
+function writeExtensionOrder(order: string[]): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, extensionOrder: order }),
+			"utf-8",
+		);
 	} catch {
 		/* no-op */
 	}
@@ -97,7 +124,8 @@ async function fetchBalance(
 	if (!resp.ok) return undefined;
 	const data = (await resp.json()) as any;
 	if (provider === "deepseek") {
-		return parseFloat(data?.balance_infos?.[0]?.total_balance).toFixed(2);
+		const v = data?.balance_infos?.[0]?.total_balance;
+		return v != null ? parseFloat(v).toFixed(2) : undefined;
 	}
 	if (provider === "moonshotai-cn") {
 		const bal = data?.data;
@@ -206,7 +234,7 @@ interface LiveHooks {
 function formatToolActivity(state: ToolActivityState): string {
 	const active = [...state.active.entries()];
 	if (active.length > 0) {
-		const [name, count] = active[0] ?? ["tool", 1];
+		const [name, count] = active[0];
 		const suffix =
 			count > 1
 				? `×${count}`
@@ -230,6 +258,7 @@ function makeFooter(
 	toolState: ToolActivityState,
 	live: LiveHooks,
 	thresholds: { warn: number; alert: number },
+	extensionOrder: string[],
 ) {
 	let disposed = false;
 	let gitTokens = "";
@@ -331,9 +360,7 @@ function makeFooter(
 					balanceProvider = "";
 				} else if (value !== undefined) {
 					balanceText = `¤¥${value}`;
-					balanceProvider = provider;
 					balanceStale = false;
-					balanceLastFetch = Date.now();
 				} else {
 					balanceText = "";
 					balanceProvider = "";
@@ -360,7 +387,6 @@ function makeFooter(
 			disposed = true;
 			unsub();
 			clearInterval(gitInterval);
-			if (gitDebounce) clearTimeout(gitDebounce);
 			if (gitDebounce) clearTimeout(gitDebounce);
 			live.requestRender = undefined;
 			live.refreshGit = undefined;
@@ -390,9 +416,9 @@ function makeFooter(
 
 			/* context usage */
 			const cu = ctx.getContextUsage();
-			const cw2 = cu?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+			const ctxWin = cu?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 			const pct = cu?.percent ?? 0;
-			const pctStr = cu?.percent !== null ? pct.toFixed(1) : "?";
+			const pctStr = cu?.percent != null ? pct.toFixed(1) : "?";
 
 			/* pwd / git */
 			let pwd = fmtCwd(
@@ -416,7 +442,7 @@ function makeFooter(
 			if ((cr || cw) && hitRate !== undefined)
 				parts.push(`CH${hitRate.toFixed(1)}%`);
 			const ctxPctDisp =
-				pctStr === "?" ? `?/${fmtTok(cw2)}` : `${pctStr}%/${fmtTok(cw2)}`;
+				pctStr === "?" ? `?/${fmtTok(ctxWin)}` : `${pctStr}%/${fmtTok(ctxWin)}`;
 			let ctxPctStr: string;
 			if (pct > 90) ctxPctStr = theme.fg("error", ctxPctDisp);
 			else if (pct > 70) ctxPctStr = theme.fg("warning", ctxPctDisp);
@@ -447,9 +473,11 @@ function makeFooter(
 			const toolText = formatToolActivity(toolState);
 			const toolColor = "accent";
 			const toolSeg = toolText ? `${theme.fg(toolColor, toolText)}  ` : "";
-			const balanceSeg = (() => {
-				if (!balanceText || ctx.model?.provider !== balanceProvider) return "";
-				const num = Number.parseFloat(balanceText.slice(2));
+			const balanceTextVal = balanceText;
+			const balanceProviderVal = ctx.model?.provider;
+			let balanceSeg = "";
+			if (balanceTextVal && balanceProviderVal === balanceProvider) {
+				const num = Number.parseFloat(balanceTextVal.slice(2));
 				const color = Number.isNaN(num)
 					? "dim"
 					: num < thresholds.alert
@@ -457,8 +485,8 @@ function makeFooter(
 						: num < thresholds.warn
 							? "warning"
 							: "dim";
-				return `  ${theme.fg(color, balanceText + (balanceStale ? "?" : ""))}`;
-			})();
+				balanceSeg = `  ${theme.fg(color, balanceTextVal + (balanceStale ? "?" : ""))}`;
+			}
 			const rw =
 				visibleWidth(right) +
 				(toolText ? visibleWidth(toolText) + 2 : 0) +
@@ -494,9 +522,33 @@ function makeFooter(
 			const raw = fd.getExtensionStatuses();
 			let mcpRgb = ""; // capture original MCP accent colour so theme changes work
 			if (raw.size > 0) {
-				const sorted = Array.from(raw.entries())
-					.sort(([a], [b]) => (a as string).localeCompare(b as string))
-					.map(([k, v]) => (v as string).trim())
+				const order = new Map<string, number>();
+				extensionOrder.forEach((key, i) => order.set(key, i));
+				const sorted = (Array.from(raw.entries()) as [string, string][])
+					.sort(([a], [b]) => {
+						const oa = order.get(a) ?? 99;
+						const ob = order.get(b) ?? 99;
+						return oa !== ob ? oa - ob : a.localeCompare(b);
+					})
+					.map(([k, v]) => {
+						if (k === "caveman") {
+							const s = (v as string)
+								.replace("caveman level:", "Caveman:")
+								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
+							return s;
+						}
+						if (k === "ponytail") {
+							const s = (v as string)
+								.replace("⚡ ", "")
+								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase())
+								.replace(
+									" 🐴 \x1b[38;2;128;128;128mponytail:",
+									" 🐴\x1b[38;2;128;128;128mponytail:",
+								);
+							return s;
+						}
+						return (v as string).trim();
+					})
 					.filter(Boolean);
 				extItems.push(...sorted);
 			}
@@ -531,7 +583,7 @@ function makeFooter(
 /*  extension entry-point                                              */
 /* ------------------------------------------------------------------ */
 
-export default function (pi: ExtensionAPI) {
+export default function (pi: any) {
 	const toolState: ToolActivityState = {
 		active: new Map(),
 		minDisplayQueue: [],
@@ -545,14 +597,24 @@ export default function (pi: ExtensionAPI) {
 
 	function applyFooter(ctx: any) {
 		const thresholds = readThresholds();
+		const extensionOrder = readExtensionOrder();
 		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
-			makeFooter(ctx, tui, theme, fd, toolState, live, thresholds),
+			makeFooter(
+				ctx,
+				tui,
+				theme,
+				fd,
+				toolState,
+				live,
+				thresholds,
+				extensionOrder,
+			),
 		);
 	}
 
 	let enabled = readPersistedEnabled();
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (_event: any, ctx: any) => {
 		enabled = readPersistedEnabled();
 		toolState.active.clear();
 		toolState.minDisplayQueue.length = 0;
@@ -651,6 +713,23 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.setFooter(undefined);
 				ctx.ui.notify("Default footer restored", "info");
 			}
+		},
+	});
+
+	pi.registerCommand("se", {
+		description:
+			"Sort extension statuses (no args = show order, keys = set order)",
+		handler: async (args: string, ctx: any) => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				const current = readExtensionOrder();
+				ctx.ui.notify(`Extension order: ${current.join(" ")}`, "info");
+				return;
+			}
+			const keys = trimmed.split(/\s+/);
+			writeExtensionOrder(keys);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(`Extension order: ${keys.join(" ")}`, "info");
 		},
 	});
 }

@@ -1,7 +1,7 @@
 {
   "name": "pi-tidy-footer",
-  "version": "0.3.0",
-  "description": "Tidy footer for Pi coding agent — preserves the built-in footer layout, with micro-adjustments and new features",
+  "version": "0.4.0",
+  "description": "Tidy footer for Pi coding agent — native layout, layered with new features: extension sort order, token balance display (color-coded warnings with configurable thresholds), git status tokens, and tool activity indicators; minor display tweaks for selected third-party extensions, keeping it clean.",
   "type": "module",
   "main": "extensions/pi-tidy-footer.ts",
   "license": "MIT",
@@ -16,8 +16,17 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./extensions/pi-tidy-footer.ts"]
+    "extensions": [
+      "./extensions/pi-tidy-footer.ts"
+    ]
   },
-  "keywords": ["pi-package", "pi-extension", "extension"],
-  "author": "eriiic7z"
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "extension"
+  ],
+  "author": "eriiic7z",
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  }
 }
