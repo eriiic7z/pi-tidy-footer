@@ -2,7 +2,7 @@
 
 [中文](#中文)
 
-Tidy footer for Pi coding agent — native layout, layered with new features: extension sort order, token balance display (color-coded warnings with configurable thresholds), git status tokens, and tool activity indicators; minor display tweaks for selected third-party extensions, keeping it clean.
+Tidy footer for Pi coding agent — native layout, layered with new features: extension sorting, token balance display (color-coded warnings with configurable thresholds), git file status, and tool activity indicators; minor display tweaks for extension labels, keeping it clean.
 
 ## Install
 
@@ -12,8 +12,8 @@ pi install npm:pi-tidy-footer
 
 ## Features
 
-- **Account balance** — Shows DeepSeek or Kimi account balance after the model name (`¤¥` format), yellow below warn threshold, red below alert threshold, both configurable
 - **Extension sort order** — Custom sort order for extension statuses, persisted across sessions; run empty command to view the current order prompt
+- **Account balance** — Shows DeepSeek or Kimi account balance after the model name (`¤¥` format), yellow below warn threshold, red below alert threshold, both configurable
 - **Git status tokens** — Repo state next to the branch name: `⇡` ahead, `⇣` behind, `+` staged, `~` modified, `?` untracked, `!` conflicts; hidden when clean
 - **Tool activity indicator** — Shows the running tool (highlighted) before the model name with brief hold for fast tools; hidden when idle
 - **Hide per-session cost** — Removes `$0.604` from the left stats area, keeping it token-focused
@@ -38,7 +38,7 @@ pi install npm:pi-tidy-footer
 
 ## 中文
 
-为 Pi coding agent 打造的整洁页脚 — 沿用原生布局，叠加了新的功能：插件自定义排序、token 余额显示（颜色警告、自定义警告阈值）、Git 状态标记、工具活动指示；对部分第三方插件进行名称显示微调，保持简洁。
+为 Pi coding agent 打造的整洁页脚 — 沿用原生布局，叠加了新的功能：插件自定义排序、token 余额显示（颜色警告、自定义警告阈值）、Git 文件状态、工具活动指示；对插件标签进行显示微调，保持简洁。
 
 ## 安装
 
@@ -48,8 +48,8 @@ pi install npm:pi-tidy-footer
 
 ## 功能
 
-- **账户余额** — 模型名后显示 DeepSeek / Kimi 账户余额（`¤¥` 格式），低于预警值（warn）变黄，低于警报值（alert）变红，阈值可自定义
 - **插件自定义排序** — 扩展状态按自定义顺序排列，持久化存储；可使用空命令查看排序字段提示
+- **账户余额** — 模型名后显示 DeepSeek / Kimi 账户余额（`¤¥` 格式），低于预警值（warn）变黄，低于警报值（alert）变红，阈值可自定义
 - **Git 状态标记** — 分支名旁显示仓库状态：`⇡` 领先、`⇣` 落后、`+` 已暂存、`~` 已修改、`?` 未跟踪、`!` 冲突；干净仓库不显示
 - **工具活动指示** — 模型名前实时显示正在运行的工具（高亮），快工具至少有短暂停留；空闲时不显示
 - **去除会话费用显示** — 从左侧统计模块移除 `$0.604`，让统计专注 token
