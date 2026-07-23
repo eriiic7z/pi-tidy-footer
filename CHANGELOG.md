@@ -2,6 +2,23 @@
 
 [中文](#中文)
 
+## [0.5.0] - 2026-07-23
+
+### Added
+
+- `/es` command: extension sort (renamed from `/se`), show or set sort order
+- `/ew` command: toggle extension wrap mode (on/off), persisted across sessions; when on, extension statuses wrap at entry boundaries instead of truncating with `...`
+- `peerDependencies` declared for `@earendil-works/pi-ai`, `@earendil-works/pi-coding-agent`, and `@earendil-works/pi-tui`
+- `homepage` field added to package.json
+
+### Changed
+
+- Extension status wrapping: entries now wrap atomically at extension boundary (single-entry overflow still truncates); replaces the native footer's single-line truncation behaviour
+- `pi.extensions` value changed from a single-file path (`./extensions/pi-tidy-footer.ts`) to a directory path (`./extensions`) for compatibility with pi.dev indexing
+- `package.json` fields reordered to standard convention
+- `/se` renamed to `/es` for consistency with other `/e-` prefixed extension commands
+- Description and README updated
+
 ## [0.4.0] - 2026-07-22
 
 ### Added
@@ -62,6 +79,23 @@
 ---
 
 ## 中文
+
+## [0.5.0] - 2026-07-23
+
+### 新增
+
+- `/es` 命令：扩展排序（原 `/se` 重命名），查看或设置排列顺序
+- `/ew` 命令：切换扩展换行模式（开/关），持久化存储；开启后扩展状态按条目边界换行，不再截断加 `...`
+- 声明 `peerDependencies`：`@earendil-works/pi-ai`、`@earendil-works/pi-coding-agent`、`@earendil-works/pi-tui`
+- 新增 `homepage` 字段
+
+### 变更
+
+- 扩展状态换行：以扩展条目为原子换行（单条超宽仍截断），替代原生 footer 的单行截断行为
+- `pi.extensions` 从单文件路径改为目录路径（`./extensions`），兼容 pi.dev 索引
+- `package.json` 字段顺序按行业规范重新排列
+- 描述与 README 更新：「插件自定义排序与换行、token 余额显示、Git 文件状态、工具活动指示」
+- `/se` 重命名为 `/es`，与后续 `e-` 前缀扩展命令统一
 
 ## [0.4.0] - 2026-07-22
 
