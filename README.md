@@ -2,7 +2,7 @@
 
 [中文](#中文)
 
-Tidy footer for Pi coding agent — native layout, layered with new features: extension sorting, token balance display (color-coded warnings with configurable thresholds), git file status, and tool activity indicators; minor display tweaks for extension labels, keeping it clean.
+Tidy footer for Pi coding agent — native layout, layered with new features: extension sorting and wrapping, token balance display (color-coded warnings with configurable thresholds), git file status, and tool activity indicators; minor display tweaks for extension labels, keeping it clean.
 
 ## Install
 
@@ -39,7 +39,7 @@ pi install npm:pi-tidy-footer
 
 ## 中文
 
-为 Pi coding agent 打造的整洁页脚 — 沿用原生布局，叠加了新的功能：插件自定义排序、token 余额显示（颜色警告、自定义警告阈值）、Git 文件状态、工具活动指示；对插件标签进行显示微调，保持简洁。
+为 Pi coding agent 打造的整洁页脚 — 沿用原生布局，叠加了新的功能：插件自定义排序与换行、token 余额显示（颜色警告、自定义警告阈值）、Git 文件状态、工具活动指示；对插件标签进行显示微调，保持简洁。
 
 ## 安装
 
