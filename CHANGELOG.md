@@ -2,6 +2,12 @@
 
 [中文](#中文)
 
+## [0.5.2] - 2026-07-25
+
+### Changed
+
+- Keywords expanded for npm/pi.dev discoverability: added `pi`, `footer`, `tidy-footer`, `statusline`, `tui`, `balance`; removed generic `extension` (redundant with `pi-extension`)
+
 ## [0.5.1] - 2026-07-23
 
 ### Changed
@@ -85,6 +91,12 @@
 ---
 
 ## 中文
+
+## [0.5.2] - 2026-07-25
+
+### 变更
+
+- 扩展关键词以提升 npm/pi.dev 可发现性：新增 `pi`、`footer`、`tidy-footer`、`statusline`、`tui`、`balance`；移除泛词 `extension`（与 `pi-extension` 冗余）
 
 ## [0.5.1] - 2026-07-23
 
