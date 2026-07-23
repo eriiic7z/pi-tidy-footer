@@ -3,30 +3,36 @@
   "version": "0.4.0",
   "description": "Tidy footer for Pi coding agent — native layout, layered with new features: extension sort order, token balance display (color-coded warnings with configurable thresholds), git status tokens, and tool activity indicators; minor display tweaks for selected third-party extensions, keeping it clean.",
   "type": "module",
-  "main": "extensions/pi-tidy-footer.ts",
   "license": "MIT",
+  "author": "eriiic7z",
+  "homepage": "https://github.com/eriiic7z/pi-tidy-footer#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/eriiic7z/pi-tidy-footer.git"
-  },
-  "files": [
-    "extensions",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
-  ],
-  "pi": {
-    "extensions": [
-      "./extensions/pi-tidy-footer.ts"
-    ]
   },
   "keywords": [
     "pi-package",
     "pi-extension",
     "extension"
   ],
-  "author": "eriiic7z",
+  "main": "extensions/pi-tidy-footer.ts",
+  "files": [
+    "extensions",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
   "devDependencies": {
     "@types/node": "^26.1.1"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
   }
 }
