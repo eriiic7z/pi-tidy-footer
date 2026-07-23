@@ -32,7 +32,8 @@ pi install npm:pi-tidy-footer
 | --- | --- |
 | `/tf` | Toggle pi-tidy-footer (on/off) |
 | `/bt <warn> <alert>` | Set balance yellow/red thresholds (warn > alert required) |
-| `/se` | Show or set extension status sort order |
+| `/es` | Extension sort (no args = show order, args = set order) |
+| `/ew` | Toggle extension wrap (on/off) |
 
 ---
 
@@ -68,4 +69,5 @@ pi install npm:pi-tidy-footer
 | --- | --- |
 | `/tf` | 切换 pi-tidy-footer 页脚（开/关） |
 | `/bt <warn> <alert>` | 设置余额黄/红阈值（warn > alert） |
-| `/se` | 查看或设置扩展状态排列顺序 |
+| `/es` | 扩展排序（空参查看，传参设置） |
+| `/ew` | 切换扩展换行模式（开/关） |

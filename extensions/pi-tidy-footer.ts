@@ -73,6 +73,30 @@ function writePersistedEnabled(enabled: boolean): void {
 	}
 }
 
+function readWrapEnabled(): boolean {
+	try {
+		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).wrapEnabled === true;
+	} catch {
+		return false;
+	}
+}
+
+function writeWrapEnabled(wrap: boolean): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, wrapEnabled: wrap }),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
 function readExtensionOrder(): string[] {
 	const fallback = ["caveman", "ponytail", "mcp", "pi-lens-lsp"];
 	try {
@@ -270,6 +294,8 @@ function makeFooter(
 	let balanceStale = false;
 	let balanceLastFetch = 0;
 	let balanceInFlight = false;
+
+	const wrapEnabled = readWrapEnabled();
 
 	const runGitStatus = () => {
 		if (disposed) return;
@@ -517,8 +543,8 @@ function makeFooter(
 				line2 = theme.fg("dim", left);
 			}
 
-			/* extension statuses */
-			const extItems: string[] = [];
+			/* extension statuses — keep key for grouped wrapping */
+			const extItems: [string, string][] = [];
 			const raw = fd.getExtensionStatuses();
 			let mcpRgb = ""; // capture original MCP accent colour so theme changes work
 			if (raw.size > 0) {
@@ -535,7 +561,7 @@ function makeFooter(
 							const s = (v as string)
 								.replace("caveman level:", "Caveman:")
 								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
-							return s;
+							return [k, s] as [string, string];
 						}
 						if (k === "ponytail") {
 							const s = (v as string)
@@ -545,11 +571,11 @@ function makeFooter(
 									" 🐴 \x1b[38;2;128;128;128mponytail:",
 									" 🐴\x1b[38;2;128;128;128mponytail:",
 								);
-							return s;
+							return [k, s] as [string, string];
 						}
-						return (v as string).trim();
+						return [k, (v as string).trim()] as [string, string];
 					})
-					.filter(Boolean);
+					.filter(([, v]) => Boolean(v));
 				extItems.push(...sorted);
 			}
 
@@ -565,13 +591,34 @@ function makeFooter(
 				line2,
 			];
 			if (extItems.length > 0) {
-				let statusLine = extItems.join(" ");
-				// Rewrite MCP: prefix with dim colour, reset after the colon
-				statusLine = statusLine.replace(
-					/MCP:/,
-					`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
-				);
-				lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
+				if (wrapEnabled) {
+					let current = "";
+					for (const [, text] of extItems) {
+						// MCP colour rewrite
+						const seg = text.replace(
+							/MCP:/,
+							`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
+						);
+						const test = current ? `${current} ${seg}` : seg;
+						if (visibleWidth(test) > width) {
+							if (current) lines.push(current);
+							current = seg;
+						} else {
+							current = test;
+						}
+					}
+					// ponytail: last-resort truncation only if a single entry exceeds terminal width
+					if (current && visibleWidth(current) > width) {
+						lines.push(truncateToWidth(current, width, theme.fg("dim", "...")));
+					} else if (current) {
+						lines.push(current);
+					}
+				} else {
+					const statusLine = extItems.map(([, t]) => t).join(" ");
+					lines.push(
+						truncateToWidth(statusLine, width, theme.fg("dim", "...")),
+					);
+				}
 			}
 
 			return lines;
@@ -716,9 +763,21 @@ export default function (pi: any) {
 		},
 	});
 
-	pi.registerCommand("se", {
-		description:
-			"Sort extension statuses (no args = show order, keys = set order)",
+	pi.registerCommand("ew", {
+		description: "Toggle extension wrap (on/off)",
+		handler: async (_args: string, ctx: any) => {
+			const next = !readWrapEnabled();
+			writeWrapEnabled(next);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				next ? "Extension wrap ON" : "Extension wrap OFF (truncate)",
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("es", {
+		description: "Extension sort (no args = show order, keys = set order)",
 		handler: async (args: string, ctx: any) => {
 			const trimmed = args.trim();
 			if (!trimmed) {
