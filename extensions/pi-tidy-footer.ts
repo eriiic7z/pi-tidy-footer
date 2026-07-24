@@ -35,9 +35,9 @@ const STATE_FILE = join(STATE_DIR, "pi-tidy-footer-state.json");
 
 function readPersistedEnabled(): boolean {
 	try {
-		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).enabled === true;
+		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).enabled !== false;
 	} catch {
-		return false;
+		return true;
 	}
 }
 
@@ -869,7 +869,14 @@ function makeFooter(
 						lines.push(current);
 					}
 				} else {
-					const statusLine = extItems.map(([, t]) => t).join(" ");
+					const statusLine = extItems
+						.map(([, t]) =>
+							t.replace(
+								/MCP:/,
+								`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
+							),
+						)
+						.join(" ");
 					lines.push(
 						truncateToWidth(statusLine, width, theme.fg("dim", "...")),
 					);

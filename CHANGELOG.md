@@ -28,6 +28,8 @@
 - Balance display: NaN guard prevents `$NaN` when balance parse fails (shows `$--` instead)
 - `writePersistedEnabled` no longer overwrites other state keys
 - Removed unused `v as string` casts in extension rendering
+- MCP label dimming: restored missing colour rewrite in non-wrapped extension display path
+- Footer now enabled by default on first install (`/tf` still toggles off)
 
 ## [0.5.2] - 2026-07-25
 
@@ -145,6 +147,8 @@
 - 余额显示：添加 NaN 守卫，余额解析失败时显示 `$--` 而非 `$NaN`
 - `writePersistedEnabled` 不再覆盖其他状态键
 - 移除扩展渲染中多余的 `v as string` 类型断言
+- MCP 标签置灰：修复非换行扩展显示路径中缺失的颜色替换
+- 页脚首次安装默认开启（`/tf` 仍可手动关闭）
 
 ## [0.5.2] - 2026-07-25
 
