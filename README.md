@@ -2,7 +2,7 @@
 
 [中文](#中文)
 
-Tidy and better footer for Pi — native layout, layered with new features: multi-currency token cost and account balance display (color-coded warnings with configurable thresholds); extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.
+Tidy and better footer for Pi — native layout, layered with new features: live display of multi-currency token cost and account balance (color-coded warnings with configurable thresholds); extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.
 
 ## Install
 
@@ -12,8 +12,8 @@ pi install npm:pi-tidy-footer
 
 ## Features
 
-- **Multi-currency token cost display** — Per-session token cost shown at end of stats line (on by default), with configurable yellow/red thresholds; 10 currencies supported with live daily exchange rates
-- **Multi-currency API account balance** — Shows account balance for DeepSeek, Kimi, OpenRouter, SiliconFlow, and Zhipu after the model name, with configurable yellow/red low-balance thresholds
+- **Multi-currency token cost display** — Per-session token cost shown live at end of stats line (on by default), with configurable yellow/red thresholds; 10 currencies supported with live daily exchange rates
+- **Multi-currency API account balance** — Shows live account balance for DeepSeek, Kimi, OpenRouter, SiliconFlow, and Zhipu after the model name, with configurable yellow/red low-balance thresholds
 - **Extension sort order** — Custom sort order for extension statuses, persisted across sessions
 - **Extension overflow wrap** — Wraps extension statuses to the next line instead of truncating with "…"; on by default, ideal for multi-extension setups
 - **Git status tokens** — Repo state next to the branch name: `⇡` ahead, `⇣` behind, `+` staged, `~` modified, `?` untracked, `!` conflicts; hidden when clean
@@ -43,7 +43,7 @@ pi install npm:pi-tidy-footer
 
 ## 中文
 
-更整洁、更好用的 Pi 页脚 — 沿用原生布局，叠加了新的功能：多币种 token 费用/账户余额显示（颜色警告、自定义警告阈值）、插件自定义排序/溢出换行/标签微调、Git 文件状态、工具活动指示。
+更整洁、更好用的 Pi 页脚 — 沿用原生布局，叠加了新的功能：多币种 token 费用/账户余额实时显示（颜色警告、自定义警告阈值）、插件自定义排序/溢出换行/标签微调、Git 文件状态、工具活动指示。
 
 ## 安装
 
@@ -53,8 +53,8 @@ pi install npm:pi-tidy-footer
 
 ## 功能
 
-- **多币种 token 花费显示** — Stats 行末尾显示会话消耗token费用（默认开启），支持 10 种币种，汇率每日自动更新：自定义token费用消耗阈值，超值时以黄/红色警示
-- **多币种 API 账户余额显示** — 模型名后显示 DeepSeek / Kimi / OpenRouter / SiliconFlow / 智谱的API账户余额；自定义余额监控阈值，低值时以黄/红色警示
+- **多币种 token 花费实时显示** — Stats 行末尾实时显示会话消耗token费用（默认开启），支持 10 种币种，汇率每日自动更新：自定义token费用消耗阈值，超值时以黄/红色警示
+- **多币种 API 账户余额实时显示** — 模型名后实时显示 DeepSeek / Kimi / OpenRouter / SiliconFlow / 智谱的API账户余额；自定义余额监控阈值，低值时以黄/红色警示
 - **插件自定义排序** — 自定义扩展状态排列顺序，持久化存储
 - **扩展溢出换行** — 适用于多扩展显示，默认开启换行，避免扩展信息被“…”截断
 - **Git 状态标记** — 分支名旁显示仓库状态：`⇡` 领先、`⇣` 落后、`+` 已暂存、`~` 已修改、`?` 未跟踪、`!` 冲突；干净仓库不显示

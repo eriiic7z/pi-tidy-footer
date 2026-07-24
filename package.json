@@ -1,7 +1,7 @@
 {
   "name": "pi-tidy-footer",
   "version": "0.6.0",
-  "description": "Tidy and better footer for Pi — native layout, layered with new features: multi-currency token cost and account balance display with color warnings; extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.",
+  "description": "Tidy and better footer for Pi — native layout, layered with new features: live display of multi-currency token cost and account balance with color warnings; extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.",
   "type": "module",
   "license": "MIT",
   "author": "eriiic7z",
