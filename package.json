@@ -1,6 +1,6 @@
 {
   "name": "pi-tidy-footer",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Tidy and better footer for Pi — native layout, layered with new features: live display of multi-currency token cost and account balance with color warnings; extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.",
   "type": "module",
   "license": "MIT",
@@ -10,23 +10,9 @@
     "type": "git",
     "url": "git+https://github.com/eriiic7z/pi-tidy-footer.git"
   },
-  "keywords": [
-    "tidy-footer",
-    "footer",
-    "balance",
-    "statusline",
-    "pi",
-    "tui",
-    "pi-package",
-    "pi-extension"
-  ],
+  "keywords": ["tidy-footer", "footer", "balance", "cost", "currency", "multi-currency", "token", "git", "sort", "wrap", "live", "statusline", "pi", "tui", "theme", "pi-package", "pi-extension"],
   "main": "extensions/pi-tidy-footer.ts",
-  "files": [
-    "extensions",
-    "README.md",
-    "CHANGELOG.md",
-    "LICENSE"
-  ],
+  "files": ["extensions", "README.md", "LICENSE"],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -36,8 +22,7 @@
     "@types/node": "^26.1.1"
   },
   "pi": {
-    "extensions": [
-      "./extensions"
-    ]
+    "extensions": ["./extensions"],
+    "image": "https://raw.githubusercontent.com/eriiic7z/pi-tidy-footer/main/assets/thumbnail.png"
   }
 }

@@ -2,6 +2,19 @@
 
 [中文](#中文)
 
+## [0.6.1] - 2026-07-26
+
+### Added
+
+- Thumbnail and screenshot assets for pi.dev gallery and README
+- SEO keywords: `cost`, `currency`, `multi-currency`, `token`, `git`, `sort`, `wrap`, `live`, `theme`
+
+### Changed
+
+- `files` streamlined to `["extensions", "README.md", "LICENSE"]` — CHANGELOG no longer shipped to users
+- Description updated to `live display of multi-currency token cost and account balance` wording
+- `package.json` arrays compacted to single-line format
+
 ## [0.6.0] - 2026-07-26
 
 ### Added
@@ -121,9 +134,20 @@
 
 ## 中文
 
-## [0.6.0] - 2026-07-26
+## [0.6.1] - 2026-07-26
 
 ### 新增
+
+- pi.dev 画廊缩略图和 README 截图资源
+- SEO 关键词：`cost`、`currency`、`multi-currency`、`token`、`git`、`sort`、`wrap`、`live`、`theme`
+
+### 变更
+
+- `files` 精简为 `["extensions", "README.md", "LICENSE"]`，CHANGELOG 不再分发给用户
+- 描述更新为 `live display of multi-currency token cost and account balance` 措辞
+- `package.json` 数组压缩为单行格式
+
+## [0.6.0] - 2026-07-26
 
 - 多币种 token 费用显示：stats 行末尾显示会话费用（默认开启），可自定义黄/红阈值并随币种切换自动换算
 - `/cd` 命令：切换费用显示开/关

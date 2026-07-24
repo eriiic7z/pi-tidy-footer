@@ -4,6 +4,8 @@
 
 Tidy and better footer for Pi — native layout, layered with new features: live display of multi-currency token cost and account balance (color-coded warnings with configurable thresholds); extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.
 
+![pi-tidy-footer](https://raw.githubusercontent.com/eriiic7z/pi-tidy-footer/main/assets/ScreenShot.png)
+
 ## Install
 
 ```bash
@@ -44,6 +46,8 @@ pi install npm:pi-tidy-footer
 ## 中文
 
 更整洁、更好用的 Pi 页脚 — 沿用原生布局，叠加了新的功能：多币种 token 费用/账户余额实时显示（颜色警告、自定义警告阈值）、插件自定义排序/溢出换行/标签微调、Git 文件状态、工具活动指示。
+
+![pi-tidy-footer](https://raw.githubusercontent.com/eriiic7z/pi-tidy-footer/main/assets/ScreenShot.png)
 
 ## 安装
 
