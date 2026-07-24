@@ -2,6 +2,33 @@
 
 [中文](#中文)
 
+## [0.6.0] - 2026-07-26
+
+### Added
+
+- Multi-currency token cost display: per-session cost shown at end of stats line (on by default), with configurable yellow/red thresholds that follow the selected currency
+- `/cd` command: toggle cost display on/off
+- `/cc` command: set or check cost currency (10 currencies supported: AUD CAD EUR GBP JPY KRW USD CNY HKD TWD)
+- `/ct <warn> <alert>` command: set or check cost thresholds (warn < alert, values follow active currency)
+- Account balance expanded to 5 providers: added OpenRouter, SiliconFlow, and Zhipu (balance now auto-converts to the selected currency)
+- Live exchange rates fetched daily from fawazahmed0/currency-api, cached in state file
+- `/bt` now supports empty args to show current thresholds in the active currency
+
+### Changed
+
+- Balance thresholds (`/bt`) now stored in USD internally and auto-converted to the selected currency for display; default values adjusted to 4.14/1.38 (USD)
+- README description updated to reflect multi-currency cost and balance features
+- Extension status `filter` moved before `sort` to reduce sorted elements
+- Rate computation extracted to `ccyRate` helper, eliminating duplicate currency conversion logic
+- Package description shortened to fit pi.dev display limits
+
+### Fixed
+
+- Tool activity indicator: 150ms minimum hold now correctly reads the display queue, preventing fast tools from flickering off immediately
+- Balance display: NaN guard prevents `$NaN` when balance parse fails (shows `$--` instead)
+- `writePersistedEnabled` no longer overwrites other state keys
+- Removed unused `v as string` casts in extension rendering
+
 ## [0.5.2] - 2026-07-25
 
 ### Changed
@@ -91,6 +118,33 @@
 ---
 
 ## 中文
+
+## [0.6.0] - 2026-07-26
+
+### 新增
+
+- 多币种 token 费用显示：stats 行末尾显示会话费用（默认开启），可自定义黄/红阈值并随币种切换自动换算
+- `/cd` 命令：切换费用显示开/关
+- `/cc` 命令：设置或查看费用币种（支持 10 种：AUD CAD EUR GBP JPY KRW USD CNY HKD TWD）
+- `/ct <warn> <alert>` 命令：设置或查看费用阈值（warn < alert，数值随当前币种换算）
+- 账户余额扩展至 5 家提供商：新增 OpenRouter、SiliconFlow、智谱（余额自动换算为当前币种）
+- 实时汇率每日从 fawazahmed0/currency-api 拉取，缓存至状态文件
+- `/bt` 空参查看当前阈值（显示为当前币种）
+
+### 变更
+
+- 余额阈值（`/bt`）内部改为 USD 存储，显示时随当前币种自动换算；默认值调整为 4.14/1.38（USD）
+- README 描述更新以反映多币种费用和余额功能
+- 扩展状态 `filter` 移至 `sort` 之前，减少排序元素数量
+- 汇率计算提取为 `ccyRate` 公共函数，消除多处重复换算逻辑
+- 包描述精简以适配 pi.dev 显示限制
+
+### 修复
+
+- 工具活动指示：150ms 最短停留现在正确读取显示队列，快工具不再立即闪烁消失
+- 余额显示：添加 NaN 守卫，余额解析失败时显示 `$--` 而非 `$NaN`
+- `writePersistedEnabled` 不再覆盖其他状态键
+- 移除扩展渲染中多余的 `v as string` 类型断言
 
 ## [0.5.2] - 2026-07-25
 

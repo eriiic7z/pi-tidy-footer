@@ -11,6 +11,21 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 const AUTH_PATH = join(homedir(), ".pi", "agent", "auth.json");
 
+const CURRENCIES: Record<string, { symbol: string; decimals: number }> = {
+	AUD: { symbol: "A$", decimals: 2 },
+	CAD: { symbol: "C$", decimals: 2 },
+	EUR: { symbol: "€", decimals: 2 },
+	GBP: { symbol: "£", decimals: 2 },
+	JPY: { symbol: "¥", decimals: 0 },
+	KRW: { symbol: "₩", decimals: 0 },
+	USD: { symbol: "$", decimals: 3 },
+	CNY: { symbol: "¥", decimals: 2 },
+	HKD: { symbol: "HK$", decimals: 2 },
+	TWD: { symbol: "NT$", decimals: 2 },
+};
+
+const CCY_LIST = Object.keys(CURRENCIES).join(" ");
+
 /* ------------------------------------------------------------------ */
 /*  persistence                                                        */
 /* ------------------------------------------------------------------ */
@@ -32,12 +47,12 @@ function readThresholds(): { warn: number; alert: number } {
 		let w = Number(raw?.balanceThresholdWarn);
 		let a = Number(raw?.balanceThresholdAlert);
 		if (!Number.isFinite(w) || !Number.isFinite(a) || w <= a) {
-			w = 30;
-			a = 10;
+			w = 4.14;
+			a = 1.38;
 		}
 		return { warn: w, alert: a };
 	} catch {
-		return { warn: 30, alert: 10 };
+		return { warn: 4.14, alert: 1.38 };
 	}
 }
 
@@ -53,6 +68,41 @@ function writeThresholds(warn: number, alert: number): void {
 				...prev,
 				balanceThresholdWarn: warn,
 				balanceThresholdAlert: alert,
+			}),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
+function readCostThresholds(): { warn: number; alert: number } {
+	try {
+		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+		let w = Number(raw?.costThresholdWarn);
+		let a = Number(raw?.costThresholdAlert);
+		if (!Number.isFinite(w) || !Number.isFinite(a) || w >= a) {
+			w = 1;
+			a = 3;
+		}
+		return { warn: w, alert: a };
+	} catch {
+		return { warn: 1, alert: 3 };
+	}
+}
+
+function writeCostThresholds(warn: number, alert: number): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({
+				...prev,
+				costThresholdWarn: warn,
+				costThresholdAlert: alert,
 			}),
 			"utf-8",
 		);
@@ -123,6 +173,87 @@ function writeExtensionOrder(order: string[]): void {
 	}
 }
 
+function readShowCost(): boolean {
+	try {
+		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).showCost !== false;
+	} catch {
+		return true;
+	}
+}
+
+function writeShowCost(show: boolean): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, showCost: show }),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
+function readCostCurrency(): string {
+	try {
+		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+		return CURRENCIES[raw?.costCurrency] ? raw.costCurrency : "USD";
+	} catch {
+		return "USD";
+	}
+}
+
+function writeCostCurrency(ccy: string): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, costCurrency: ccy }),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
+function readFxCache(): {
+	rates: Record<string, number>;
+	fetchedAt: number;
+} | null {
+	try {
+		const cache = JSON.parse(readFileSync(STATE_FILE, "utf-8")).fxCache;
+		if (cache?.rates && cache?.fetchedAt) return cache;
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+function writeFxCache(cache: {
+	rates: Record<string, number>;
+	fetchedAt: number;
+}): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, fxCache: cache }),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
 function getApiKey(provider: string): string | undefined {
 	try {
 		return (JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as any)[provider]?.key;
@@ -131,45 +262,88 @@ function getApiKey(provider: string): string | undefined {
 	}
 }
 
+const BALANCE_PROVIDERS: Record<
+	string,
+	{ url: string; currency: string; parse: (data: any) => string | undefined }
+> = {
+	deepseek: {
+		url: "https://api.deepseek.com/user/balance",
+		currency: "CNY",
+		parse: (data) => {
+			const v = data?.balance_infos?.[0]?.total_balance;
+			return v != null ? parseFloat(v).toFixed(2) : undefined;
+		},
+	},
+	"moonshotai-cn": {
+		url: "https://api.moonshot.cn/v1/users/me/balance",
+		currency: "CNY",
+		parse: (data) => {
+			const bal = data?.data;
+			const cash = Number.parseFloat(bal?.cash_balance ?? "");
+			const voucher = Number.parseFloat(bal?.voucher_balance ?? "");
+			const available = Number.parseFloat(bal?.available_balance ?? "");
+			const raw =
+				Number.isNaN(cash) || Number.isNaN(voucher)
+					? Number.isNaN(available)
+						? undefined
+						: available
+					: cash + voucher;
+			return raw === undefined ? undefined : raw.toFixed(2);
+		},
+	},
+	openrouter: {
+		url: "https://openrouter.ai/api/v1/credits",
+		currency: "USD",
+		parse: (data) => {
+			const v = data?.data?.total_credits;
+			return v != null ? parseFloat(v).toFixed(2) : undefined;
+		},
+	},
+	siliconflow: {
+		url: "https://api.siliconflow.cn/v1/user/info",
+		currency: "CNY",
+		parse: (data) => {
+			const v = data?.data?.balance;
+			return v != null ? parseFloat(v).toFixed(2) : undefined;
+		},
+	},
+	zhipu: {
+		url: "https://open.bigmodel.cn/api/paas/v4/account/billing",
+		currency: "CNY",
+		parse: (data) => {
+			const v = data?.balance;
+			return v != null ? parseFloat(v).toFixed(2) : undefined;
+		},
+	},
+};
+
+const BALANCE_PROVIDER_KEYS = new Set(Object.keys(BALANCE_PROVIDERS));
+
 async function fetchBalance(
 	provider: string,
 	key: string,
 ): Promise<string | undefined> {
-	const url =
-		provider === "deepseek"
-			? "https://api.deepseek.com/user/balance"
-			: provider === "moonshotai-cn"
-				? "https://api.moonshot.cn/v1/users/me/balance"
-				: null;
-	if (!url) return undefined;
-	const resp = await fetch(url, {
+	const cfg = BALANCE_PROVIDERS[provider];
+	if (!cfg) return undefined;
+	const resp = await fetch(cfg.url, {
 		headers: { Authorization: `Bearer ${key}` },
 	});
 	if (!resp.ok) return undefined;
 	const data = (await resp.json()) as any;
-	if (provider === "deepseek") {
-		const v = data?.balance_infos?.[0]?.total_balance;
-		return v != null ? parseFloat(v).toFixed(2) : undefined;
-	}
-	if (provider === "moonshotai-cn") {
-		const bal = data?.data;
-		const cash = Number.parseFloat(bal?.cash_balance ?? "");
-		const voucher = Number.parseFloat(bal?.voucher_balance ?? "");
-		const available = Number.parseFloat(bal?.available_balance ?? "");
-		const raw =
-			Number.isNaN(cash) || Number.isNaN(voucher)
-				? Number.isNaN(available)
-					? undefined
-					: available
-				: cash + voucher;
-		return raw === undefined ? undefined : raw.toFixed(2);
-	}
-	return undefined;
+	return cfg.parse(data);
 }
 
 /* ------------------------------------------------------------------ */
 /*  helpers                                                            */
 /* ------------------------------------------------------------------ */
+
+function ccyRate(
+	ccy: string,
+	rates: Record<string, number> | null | undefined,
+): number {
+	if (ccy === "USD") return 1;
+	return rates?.[ccy.toLowerCase()] ?? 1;
+}
 
 function fmtTok(n: number): string {
 	if (n < 1000) return `${n}`;
@@ -191,8 +365,33 @@ function fmtCwd(cwd: string, home: string | undefined): string {
 	return cwd;
 }
 
-/* ------------------------------------------------------------------ */
-/*  git status tokens (feature ported from pi-statusline, plain style) */
+function fmtCost(
+	inp: number,
+	out: number,
+	cr: number,
+	cw: number,
+	model: any,
+	ccy: string,
+	fx: Record<string, number> | null,
+	costThresholds: { warn: number; alert: number },
+): { text: string; color: string } {
+	const rate = ccyRate(ccy, fx);
+	const cost =
+		(inp / 1_000_000) * (model.cost?.input ?? 0) +
+		(out / 1_000_000) * (model.cost?.output ?? 0) +
+		(cr / 1_000_000) * (model.cost?.cacheRead ?? 0) +
+		(cw / 1_000_000) * (model.cost?.cacheWrite ?? 0);
+	const local = cost * rate;
+	const info = CURRENCIES[ccy] ?? CURRENCIES.USD;
+	const tWarn = costThresholds.warn * rate;
+	const tAlert = costThresholds.alert * rate;
+	const color = local > tAlert ? "error" : local > tWarn ? "warning" : "dim";
+	return {
+		text: `${info.symbol}${local.toFixed(info.decimals)}`,
+		color,
+	};
+}
+
 /* ------------------------------------------------------------------ */
 
 function parseGitStatusTokens(stdout: string): string {
@@ -267,6 +466,11 @@ function formatToolActivity(state: ToolActivityState): string {
 					: "";
 		return `⚙ ${name}${suffix}`;
 	}
+	// hold the last finished tool briefly to prevent flicker
+	if (state.minDisplayQueue.length > 0) {
+		const name = state.minDisplayQueue.at(-1) ?? "tool";
+		return `⚙ ${name}`;
+	}
 	return "";
 }
 
@@ -282,6 +486,7 @@ function makeFooter(
 	toolState: ToolActivityState,
 	live: LiveHooks,
 	thresholds: { warn: number; alert: number },
+	costThresholds: { warn: number; alert: number },
 	extensionOrder: string[],
 ) {
 	let disposed = false;
@@ -296,6 +501,34 @@ function makeFooter(
 	let balanceInFlight = false;
 
 	const wrapEnabled = readWrapEnabled();
+
+	const showCost = readShowCost();
+	const costCurrency = readCostCurrency();
+	let fxCache = readFxCache();
+
+	const refreshFx = () => {
+		if (disposed) return;
+		void (async () => {
+			try {
+				const resp = await fetch(
+					"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.min.json",
+				);
+				const data = (await resp.json()) as any;
+				const rates: Record<string, number> = data?.usd ?? {};
+				delete rates.date;
+				if (Object.keys(rates).length === 0) return;
+				fxCache = { rates, fetchedAt: Date.now() };
+				writeFxCache(fxCache);
+				if (!disposed) tui.requestRender();
+			} catch {
+				/* keep old cache */
+			}
+		})();
+	};
+
+	if (!fxCache || Date.now() - fxCache.fetchedAt > 86_400_000) {
+		refreshFx();
+	}
 
 	const runGitStatus = () => {
 		if (disposed) return;
@@ -356,7 +589,7 @@ function makeFooter(
 	const runBalance = () => {
 		if (disposed) return;
 		const provider = ctx.model?.provider;
-		if (provider !== "deepseek" && provider !== "moonshotai-cn") {
+		if (!BALANCE_PROVIDER_KEYS.has(provider)) {
 			balanceText = "";
 			balanceProvider = "";
 			balanceStale = false;
@@ -469,11 +702,21 @@ function makeFooter(
 				parts.push(`CH${hitRate.toFixed(1)}%`);
 			const ctxPctDisp =
 				pctStr === "?" ? `?/${fmtTok(ctxWin)}` : `${pctStr}%/${fmtTok(ctxWin)}`;
-			let ctxPctStr: string;
-			if (pct > 90) ctxPctStr = theme.fg("error", ctxPctDisp);
-			else if (pct > 70) ctxPctStr = theme.fg("warning", ctxPctDisp);
-			else ctxPctStr = ctxPctDisp;
+			const ctxPctStr = theme.fg("dim", ctxPctDisp);
 			parts.push(ctxPctStr);
+			if (showCost) {
+				const result = fmtCost(
+					inp,
+					out,
+					cr,
+					cw,
+					ctx.model,
+					costCurrency,
+					fxCache?.rates ?? null,
+					costThresholds,
+				);
+				parts.push(theme.fg(result.color, result.text));
+			}
 
 			let left = parts.join(" ");
 			let lw = visibleWidth(left);
@@ -497,21 +740,33 @@ function makeFooter(
 				right = tl === "off" ? `${mName} • thinking off` : `${mName} • ${tl}`;
 			}
 			const toolText = formatToolActivity(toolState);
-			const toolColor = "accent";
-			const toolSeg = toolText ? `${theme.fg(toolColor, toolText)}  ` : "";
+			const toolSeg = toolText ? `${theme.fg("accent", toolText)}  ` : "";
 			const balanceTextVal = balanceText;
 			const balanceProviderVal = ctx.model?.provider;
 			let balanceSeg = "";
 			if (balanceTextVal && balanceProviderVal === balanceProvider) {
-				const num = Number.parseFloat(balanceTextVal.slice(2));
-				const color = Number.isNaN(num)
+				const rawNum = Number.parseFloat(balanceTextVal.slice(2));
+				const srcCcy = BALANCE_PROVIDERS[balanceProvider]?.currency;
+				let displayNum = rawNum;
+				const rate = ccyRate(costCurrency, fxCache?.rates);
+				if (srcCcy && costCurrency !== srcCcy && fxCache) {
+					const srcRate = ccyRate(srcCcy, fxCache?.rates);
+					displayNum = (rawNum / srcRate) * rate;
+				}
+				const tWarn = thresholds.warn * rate;
+				const tAlert = thresholds.alert * rate;
+				const color = !Number.isFinite(displayNum)
 					? "dim"
-					: num < thresholds.alert
+					: displayNum < tAlert
 						? "error"
-						: num < thresholds.warn
+						: displayNum < tWarn
 							? "warning"
 							: "dim";
-				balanceSeg = `  ${theme.fg(color, balanceTextVal + (balanceStale ? "?" : ""))}`;
+				const info = CURRENCIES[costCurrency] ?? CURRENCIES.USD;
+				const formatted = Number.isFinite(displayNum)
+					? `${info.symbol}${displayNum.toFixed(info.decimals)}`
+					: `${info.symbol}--`;
+				balanceSeg = `  ${theme.fg(color, formatted + (balanceStale ? "?" : ""))}`;
 			}
 			const rw =
 				visibleWidth(right) +
@@ -551,6 +806,7 @@ function makeFooter(
 				const order = new Map<string, number>();
 				extensionOrder.forEach((key, i) => order.set(key, i));
 				const sorted = (Array.from(raw.entries()) as [string, string][])
+					.filter(([, v]) => v.trim())
 					.sort(([a], [b]) => {
 						const oa = order.get(a) ?? 99;
 						const ob = order.get(b) ?? 99;
@@ -558,13 +814,13 @@ function makeFooter(
 					})
 					.map(([k, v]) => {
 						if (k === "caveman") {
-							const s = (v as string)
+							const s = v
 								.replace("caveman level:", "Caveman:")
 								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
 							return [k, s] as [string, string];
 						}
 						if (k === "ponytail") {
-							const s = (v as string)
+							const s = v
 								.replace("⚡ ", "")
 								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase())
 								.replace(
@@ -573,9 +829,8 @@ function makeFooter(
 								);
 							return [k, s] as [string, string];
 						}
-						return [k, (v as string).trim()] as [string, string];
-					})
-					.filter(([, v]) => Boolean(v));
+						return [k, v.trim()] as [string, string];
+					});
 				extItems.push(...sorted);
 			}
 
@@ -644,6 +899,7 @@ export default function (pi: any) {
 
 	function applyFooter(ctx: any) {
 		const thresholds = readThresholds();
+		const costThresholds = readCostThresholds();
 		const extensionOrder = readExtensionOrder();
 		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
 			makeFooter(
@@ -654,6 +910,7 @@ export default function (pi: any) {
 				toolState,
 				live,
 				thresholds,
+				costThresholds,
 				extensionOrder,
 			),
 		);
@@ -723,6 +980,17 @@ export default function (pi: any) {
 			"Set balance thresholds: warn (yellow) / alert (red), warn > alert",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
+			if (!args.trim()) {
+				const t = readThresholds();
+				const ccy = readCostCurrency();
+				const fxCache = readFxCache();
+				const rate = ccyRate(ccy, fxCache?.rates);
+				ctx.ui.notify(
+					`Balance thresholds: yellow < ${(t.warn * rate).toFixed(2)}, red < ${(t.alert * rate).toFixed(2)} (${ccy})`,
+					"info",
+				);
+				return;
+			}
 			const warn = Number(parts[0]);
 			const alert = Number(parts[1]);
 			if (
@@ -731,17 +999,22 @@ export default function (pi: any) {
 				!Number.isFinite(alert) ||
 				warn <= alert
 			) {
+				const ccy = readCostCurrency();
+				const fxCache = readFxCache();
+				const rate = ccyRate(ccy, fxCache?.rates);
 				ctx.ui.notify(
-					"Usage: /bt <warn> <alert> (warn > alert). Default: 30 10",
+					`Usage: /bt <warn> <alert> (warn > alert). Default: ${(4.14 * rate).toFixed(2)} ${(1.38 * rate).toFixed(2)} (${ccy})`,
 					"error",
 				);
 				return;
 			}
-			writeThresholds(warn, alert);
-			// re-apply footer with fresh thresholds
+			const ccy = readCostCurrency();
+			const fxCache = readFxCache();
+			const rate = ccyRate(ccy, fxCache?.rates);
+			writeThresholds(warn / rate, alert / rate);
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(
-				`Balance thresholds: yellow < ${warn}, red < ${alert}`,
+				`Balance thresholds: yellow < ${warn}, red < ${alert} (${ccy})`,
 				"info",
 			);
 		},
@@ -789,6 +1062,88 @@ export default function (pi: any) {
 			writeExtensionOrder(keys);
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(`Extension order: ${keys.join(" ")}`, "info");
+		},
+	});
+
+	pi.registerCommand("cd", {
+		description: "Cost display toggle (on/off)",
+		handler: async (_args: string, ctx: any) => {
+			const next = !readShowCost();
+			writeShowCost(next);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(next ? "Cost ON" : "Cost OFF", "info");
+		},
+	});
+
+	pi.registerCommand("cc", {
+		description: "Cost currency (no args = list, code = set)",
+		handler: async (args: string, ctx: any) => {
+			const ccy = args.trim().toUpperCase();
+			if (!ccy) {
+				const current = readCostCurrency();
+				const list = CCY_LIST;
+				ctx.ui.notify(
+					`Currency: ${current} (${CURRENCIES[current]?.symbol ?? "$"}). Available: ${list}`,
+					"info",
+				);
+				return;
+			}
+			if (!CURRENCIES[ccy]) {
+				const list = CCY_LIST;
+				ctx.ui.notify(`Unknown currency: ${ccy}. Available: ${list}`, "error");
+				return;
+			}
+			writeCostCurrency(ccy);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				`Currency: ${ccy} (${CURRENCIES[ccy].symbol}). You may want to adjust balance (/bt) and cost (/ct) thresholds.`,
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("ct", {
+		description:
+			"Cost threshold (no args = show, <warn> <alert> = set, warn < alert)",
+		handler: async (args: string, ctx: any) => {
+			const parts = args.trim().split(/\s+/);
+			if (!args.trim()) {
+				const t = readCostThresholds();
+				const ccy = readCostCurrency();
+				const fxCache = readFxCache();
+				const rate = ccyRate(ccy, fxCache?.rates);
+				ctx.ui.notify(
+					`Cost thresholds: yellow > ${(t.warn * rate).toFixed(2)}, red > ${(t.alert * rate).toFixed(2)} (${ccy})`,
+					"info",
+				);
+				return;
+			}
+			const warn = Number(parts[0]);
+			const alert = Number(parts[1]);
+			if (
+				parts.length !== 2 ||
+				!Number.isFinite(warn) ||
+				!Number.isFinite(alert) ||
+				warn >= alert
+			) {
+				const ccy = readCostCurrency();
+				const fxCache = readFxCache();
+				const rate = ccyRate(ccy, fxCache?.rates);
+				ctx.ui.notify(
+					`Usage: /ct <warn> <alert> (warn < alert). Default: ${(1 * rate).toFixed(2)} ${(3 * rate).toFixed(2)} (${ccy})`,
+					"error",
+				);
+				return;
+			}
+			const ccy = readCostCurrency();
+			const fxCache = readFxCache();
+			const rate = ccyRate(ccy, fxCache?.rates);
+			writeCostThresholds(warn / rate, alert / rate);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				`Cost thresholds: yellow > ${warn}, red > ${alert} (${ccy})`,
+				"info",
+			);
 		},
 	});
 }
