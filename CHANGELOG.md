@@ -2,6 +2,19 @@
 
 [中文](#中文)
 
+## [0.7.0] - 2026-07-26
+
+### Removed
+
+- **`/cd` cost toggle removed** — `readShowCost`/`writeShowCost` functions and `/cd` command deleted. Cost display now hard-wired on at end of stats line. Toggle introduced in 0.6.0 when only USD was available; multi-currency and auto fx rates eliminated the need.
+
+### Changed
+
+- **`/cc` renamed to `/sc`** (switch currency), moved before `/bt` in command list; description updated to reflect it controls currency for both balance and cost display
+- Command order reorganized to `tf → sc → bt → ct → es → ew` for logical flow: toggle → currency → balance thresholds → cost thresholds → extension sort → extension wrap
+- `/bt` description reformatted to match `/ct` style: `"Balance thresholds (no args = show, <warn> <alert> = set, warn > alert)"`
+- `/ct` description pluralized from `"Cost threshold"` to `"Cost thresholds"` for consistency
+
 ## [0.6.1] - 2026-07-26
 
 ### Added
@@ -133,6 +146,19 @@
 ---
 
 ## 中文
+
+## [0.7.0] - 2026-07-26
+
+### 移除
+
+- **`/cd` 费用开关已移除** — 删除 `readShowCost`/`writeShowCost` 函数和 `/cd` 命令。费用现在始终在 stats 行末尾显示。该开关在 0.6.0 时期仅支持单币种 USD 时引入；多币种和自动汇率已消除此需求。
+
+### 变更
+
+- **`/cc` 重命名为 `/sc`**（switch currency），移至 `/bt` 之前；描述更新为明确同时作用于余额和费用显示
+- 命令顺序调整为 `tf → sc → bt → ct → es → ew`，逻辑流：开关 → 币种 → 余额阈值 → 费用阈值 → 扩展排序 → 扩展换行
+- `/bt` 描述统一为 `/ct` 风格
+- `/ct` 描述从 `"Cost threshold"` 改为 `"Cost thresholds"`，统一复数形式
 
 ## [0.6.1] - 2026-07-26
 

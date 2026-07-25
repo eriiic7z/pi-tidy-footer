@@ -173,30 +173,6 @@ function writeExtensionOrder(order: string[]): void {
 	}
 }
 
-function readShowCost(): boolean {
-	try {
-		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).showCost !== false;
-	} catch {
-		return true;
-	}
-}
-
-function writeShowCost(show: boolean): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, showCost: show }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
-}
-
 function readCostCurrency(): string {
 	try {
 		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
@@ -502,7 +478,6 @@ function makeFooter(
 
 	const wrapEnabled = readWrapEnabled();
 
-	const showCost = readShowCost();
 	const costCurrency = readCostCurrency();
 	let fxCache = readFxCache();
 
@@ -704,19 +679,17 @@ function makeFooter(
 				pctStr === "?" ? `?/${fmtTok(ctxWin)}` : `${pctStr}%/${fmtTok(ctxWin)}`;
 			const ctxPctStr = theme.fg("dim", ctxPctDisp);
 			parts.push(ctxPctStr);
-			if (showCost) {
-				const result = fmtCost(
-					inp,
-					out,
-					cr,
-					cw,
-					ctx.model,
-					costCurrency,
-					fxCache?.rates ?? null,
-					costThresholds,
-				);
-				parts.push(theme.fg(result.color, result.text));
-			}
+			const result = fmtCost(
+				inp,
+				out,
+				cr,
+				cw,
+				ctx.model,
+				costCurrency,
+				fxCache?.rates ?? null,
+				costThresholds,
+			);
+			parts.push(theme.fg(result.color, result.text));
 
 			let left = parts.join(" ");
 			let lw = visibleWidth(left);
@@ -982,9 +955,53 @@ export default function (pi: any) {
 		live.refreshBalance?.();
 	});
 
+	pi.registerCommand("tf", {
+		description: "Toggle pi-tidy-footer on / off",
+		handler: async (_args: string, ctx: any) => {
+			enabled = !enabled;
+			writePersistedEnabled(enabled);
+
+			if (enabled) {
+				applyFooter(ctx);
+				ctx.ui.notify("Cost-free footer ON", "info");
+			} else {
+				ctx.ui.setFooter(undefined);
+				ctx.ui.notify("Default footer restored", "info");
+			}
+		},
+	});
+
+	pi.registerCommand("sc", {
+		description:
+			"Switch currency for balance and cost display (no args = list, /sc <code> = set)",
+		handler: async (args: string, ctx: any) => {
+			const ccy = args.trim().toUpperCase();
+			if (!ccy) {
+				const current = readCostCurrency();
+				const list = CCY_LIST;
+				ctx.ui.notify(
+					`Currency: ${current} (${CURRENCIES[current]?.symbol ?? "$"}). Available: ${list}`,
+					"info",
+				);
+				return;
+			}
+			if (!CURRENCIES[ccy]) {
+				const list = CCY_LIST;
+				ctx.ui.notify(`Unknown currency: ${ccy}. Available: ${list}`, "error");
+				return;
+			}
+			writeCostCurrency(ccy);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				`Currency: ${ccy} (${CURRENCIES[ccy].symbol}). You may want to adjust balance (/bt) and cost (/ct) thresholds.`,
+				"info",
+			);
+		},
+	});
+
 	pi.registerCommand("bt", {
 		description:
-			"Set balance thresholds: warn (yellow) / alert (red), warn > alert",
+			"Balance thresholds (no args = show, <warn> <alert> = set, warn > alert)",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			if (!args.trim()) {
@@ -1027,91 +1044,9 @@ export default function (pi: any) {
 		},
 	});
 
-	pi.registerCommand("tf", {
-		description: "Toggle pi-tidy-footer on / off",
-		handler: async (_args: string, ctx: any) => {
-			enabled = !enabled;
-			writePersistedEnabled(enabled);
-
-			if (enabled) {
-				applyFooter(ctx);
-				ctx.ui.notify("Cost-free footer ON", "info");
-			} else {
-				ctx.ui.setFooter(undefined);
-				ctx.ui.notify("Default footer restored", "info");
-			}
-		},
-	});
-
-	pi.registerCommand("ew", {
-		description: "Toggle extension wrap (on/off)",
-		handler: async (_args: string, ctx: any) => {
-			const next = !readWrapEnabled();
-			writeWrapEnabled(next);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(
-				next ? "Extension wrap ON" : "Extension wrap OFF (truncate)",
-				"info",
-			);
-		},
-	});
-
-	pi.registerCommand("es", {
-		description: "Extension sort (no args = show order, keys = set order)",
-		handler: async (args: string, ctx: any) => {
-			const trimmed = args.trim();
-			if (!trimmed) {
-				const current = readExtensionOrder();
-				ctx.ui.notify(`Extension order: ${current.join(" ")}`, "info");
-				return;
-			}
-			const keys = trimmed.split(/\s+/);
-			writeExtensionOrder(keys);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(`Extension order: ${keys.join(" ")}`, "info");
-		},
-	});
-
-	pi.registerCommand("cd", {
-		description: "Cost display toggle (on/off)",
-		handler: async (_args: string, ctx: any) => {
-			const next = !readShowCost();
-			writeShowCost(next);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(next ? "Cost ON" : "Cost OFF", "info");
-		},
-	});
-
-	pi.registerCommand("cc", {
-		description: "Cost currency (no args = list, code = set)",
-		handler: async (args: string, ctx: any) => {
-			const ccy = args.trim().toUpperCase();
-			if (!ccy) {
-				const current = readCostCurrency();
-				const list = CCY_LIST;
-				ctx.ui.notify(
-					`Currency: ${current} (${CURRENCIES[current]?.symbol ?? "$"}). Available: ${list}`,
-					"info",
-				);
-				return;
-			}
-			if (!CURRENCIES[ccy]) {
-				const list = CCY_LIST;
-				ctx.ui.notify(`Unknown currency: ${ccy}. Available: ${list}`, "error");
-				return;
-			}
-			writeCostCurrency(ccy);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(
-				`Currency: ${ccy} (${CURRENCIES[ccy].symbol}). You may want to adjust balance (/bt) and cost (/ct) thresholds.`,
-				"info",
-			);
-		},
-	});
-
 	pi.registerCommand("ct", {
 		description:
-			"Cost threshold (no args = show, <warn> <alert> = set, warn < alert)",
+			"Cost thresholds (no args = show, <warn> <alert> = set, warn < alert)",
 		handler: async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			if (!args.trim()) {
@@ -1149,6 +1084,35 @@ export default function (pi: any) {
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(
 				`Cost thresholds: yellow > ${warn}, red > ${alert} (${ccy})`,
+				"info",
+			);
+		},
+	});
+
+	pi.registerCommand("es", {
+		description: "Extension sort (no args = show order, keys = set order)",
+		handler: async (args: string, ctx: any) => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				const current = readExtensionOrder();
+				ctx.ui.notify(`Extension order: ${current.join(" ")}`, "info");
+				return;
+			}
+			const keys = trimmed.split(/\s+/);
+			writeExtensionOrder(keys);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(`Extension order: ${keys.join(" ")}`, "info");
+		},
+	});
+
+	pi.registerCommand("ew", {
+		description: "Toggle extension wrap (on/off)",
+		handler: async (_args: string, ctx: any) => {
+			const next = !readWrapEnabled();
+			writeWrapEnabled(next);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				next ? "Extension wrap ON" : "Extension wrap OFF (truncate)",
 				"info",
 			);
 		},

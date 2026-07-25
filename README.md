@@ -14,7 +14,7 @@ pi install npm:pi-tidy-footer
 
 ## Features
 
-- **Multi-currency token cost display** — Per-session token cost shown live at end of stats line (on by default), with configurable yellow/red thresholds; 10 currencies supported with live daily exchange rates
+- **Multi-currency token cost display** — Per-session token cost shown live at end of stats line, with configurable yellow/red thresholds; 10 currencies supported with live daily exchange rates
 - **Multi-currency API account balance** — Shows live account balance for DeepSeek, Kimi, OpenRouter, SiliconFlow, and Zhipu after the model name, with configurable yellow/red low-balance thresholds
 - **Extension sort order** — Custom sort order for extension statuses, persisted across sessions
 - **Extension overflow wrap** — Wraps extension statuses to the next line instead of truncating with "…"; on by default, ideal for multi-extension setups
@@ -34,9 +34,8 @@ pi install npm:pi-tidy-footer
 | Command | Description |
 | --- | --- |
 | `/tf` | Toggle pi-tidy-footer (on/off) |
+| `/sc` | Switch currency for balance and cost display (no args = list, /sc <code> = set) |
 | `/bt <warn> <alert>` | Balance thresholds (no args = show, warn > alert) |
-| `/cd` | Toggle cost display (on/off) |
-| `/cc` | Cost currency (no args = list, code = set) |
 | `/ct <warn> <alert>` | Cost thresholds (no args = show, warn < alert) |
 | `/es` | Extension sort (no args = show order, args = set order) |
 | `/ew` | Toggle extension wrap (on/off) |
@@ -57,7 +56,7 @@ pi install npm:pi-tidy-footer
 
 ## 功能
 
-- **多币种 token 花费实时显示** — Stats 行末尾实时显示会话消耗token费用（默认开启），支持 10 种币种，汇率每日自动更新：自定义token费用消耗阈值，超值时以黄/红色警示
+- **多币种 token 花费实时显示** — Stats 行末尾实时显示会话消耗token费用，支持 10 种币种，汇率每日自动更新：自定义token费用消耗阈值，超值时以黄/红色警示
 - **多币种 API 账户余额实时显示** — 模型名后实时显示 DeepSeek / Kimi / OpenRouter / SiliconFlow / 智谱的API账户余额；自定义余额监控阈值，低值时以黄/红色警示
 - **插件自定义排序** — 自定义扩展状态排列顺序，持久化存储
 - **扩展溢出换行** — 适用于多扩展显示，默认开启换行，避免扩展信息被“…”截断
@@ -77,9 +76,8 @@ pi install npm:pi-tidy-footer
 | 命令 | 说明 |
 | --- | --- |
 | `/tf` | 切换 pi-tidy-footer 页脚（开/关） |
+| `/sc` | 切换币种，同时作用于余额和费用显示（空参查看，/sc <code> 设置） |
 | `/bt <warn> <alert>` | 余额阈值（空参查看，warn > alert） |
-| `/cd` | 切换费用显示（开/关） |
-| `/cc` | 币种切换（空参查看，传参设置） |
 | `/ct <warn> <alert>` | 费用阈值（空参查看，warn < alert） |
 | `/es` | 扩展排序（空参查看，传参设置） |
 | `/ew` | 切换扩展换行模式（开/关） |
