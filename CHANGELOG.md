@@ -2,7 +2,24 @@
 
 [中文](#中文)
 
-## [0.7.0] - 2026-07-26
+## [0.8.0] - 2026-07-31
+
+### Added
+
+- **Balance symbol prefix** — configurable prefix before balance display (e.g. `⛽︎$0.12`). `/bs` toggles among ⛽ / ◎◉ / ◉; `/bs <symbol>` sets a custom symbol (persisted); `/bs -d <symbol>` deletes; `/bs -l` lists all active symbols. Wrap in `" "` to keep trailing spaces (e.g. `/bs "* "` → `* $0.12`).
+- **Disabled command guard** — when footer is toggled off via `/tf`, all sub-commands (`/sc` `/bt` `/bs` `/ct` `/es` `/ew`) show `Command unavailable: pi-tidy-footer disabled. Use /tf to enable.` and return immediately. Only `/tf` itself is exempt.
+
+### Changed
+
+- **Notification system overhaul** — all command descriptions, status messages, and error messages now follow a consistent 7-category scheme:
+  - **F (descriptions)** — 7 commands rewritten to `<object>: <usage1>; <usage2>` format (colon-delimited object, semicolon-separated behaviours).
+  - **B (toggle)** — `/tf` → `Tidy footer: ENABLED` / `Tidy footer: DISABLED. Config saved, /tf to re-enable.` `/ew` → `Extension wrap: ON` / `Extension wrap: OFF`.
+  - **D/E (errors)** — invalid currency → `Invalid currency: "XXX". Available: …`. Threshold format errors → `Usage: /<cmd> <warn> <alert> — warn must be greater/less than alert. Default: …`. Missing symbol for delete → `Invalid symbol: "XXX". Use /bs -l to list available symbols.`
+  - **G (precondition)** — disabled state guards use `Command unavailable: pi-tidy-footer disabled. Use /tf to enable.`
+- **Universal emoji gap removal** — extension statuses (MCP, ponytail, etc.) now strip whitespace between any emoji and its following text via `/(\p{Extended_Pictographic})\s+/gu`. Removed the narrow ponytail-only cleanup; new extensions need no per-extension handling.
+- **MCP status compacted** — `servers` prefix removed from MCP display (`7 servers enabled` → `7 enabled`).
+
+## [0.7.0] - 2026-07-25
 
 ### Removed
 
@@ -147,7 +164,24 @@
 
 ## 中文
 
-## [0.7.0] - 2026-07-26
+## [0.8.0] - 2026-07-31
+
+### 新增
+
+- **余额符号前缀** — 余额显示前加可配置前缀（如 `⛽︎$0.12`）。`/bs` 在 ⛽ / ◎◉ / ◉ 之间循环切换；`/bs <符号>` 设置自定义符号（持久化）；`/bs -d <符号>` 删除；`/bs -l` 列出所有符号。用 `" "` 包裹以保留尾部空格（如 `/bs "* "` → `* $0.12`）。
+- **禁用状态命令守卫** — 通过 `/tf` 关闭页脚后，所有子命令（`/sc` `/bt` `/bs` `/ct` `/es` `/ew`）均显示 `Command unavailable: pi-tidy-footer disabled. Use /tf to enable.` 并直接返回。仅 `/tf` 自身豁免。
+
+### 变更
+
+- **通知体系全面重整** — 命令描述、状态提示、错误信息统一遵循 7 类规范方案：
+  - **F 类（描述）** — 7 条命令重写为「对象：用法1；用法2」格式（冒号分隔对象、分号分隔行为）。
+  - **B 类（开关）** — `/tf` → `Tidy footer: ENABLED` / `Tidy footer: DISABLED. Config saved, /tf to re-enable.`。`/ew` → `Extension wrap: ON` / `Extension wrap: OFF`。
+  - **D/E 类（错误）** — 未知币种 → `Invalid currency: "XXX". Available: …`。阈值格式错误 → `Usage: /<cmd> <warn> <alert> — warn must be greater/less than alert. Default: …`。删除不存在的符号 → `Invalid symbol: "XXX". Use /bs -l to list available symbols.`
+  - **G 类（前置条件）** — 禁用状态守卫统一使用 `Command unavailable: pi-tidy-footer disabled. Use /tf to enable.`
+- **通用 emoji 间距规则** — 扩展状态（MCP、ponytail 等）统一经过 `/(\p{Extended_Pictographic})\s+/gu` 删除 emoji 与后续文字之间的空白。移除原先 ponytail 专用的空格清理代码；新增扩展无需逐扩展特殊处理。
+- **MCP 状态精简** — 去除 MCP 显示中的 `servers` 字样（`7 servers enabled` → `7 enabled`）。
+
+## [0.7.0] - 2026-07-25
 
 ### 移除
 

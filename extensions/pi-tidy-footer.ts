@@ -25,6 +25,11 @@ const CURRENCIES: Record<string, { symbol: string; decimals: number }> = {
 };
 
 const CCY_LIST = Object.keys(CURRENCIES).join(" ");
+const BALANCE_SYMBOL_OPTIONS: Record<string, string> = {
+	"⛽": "⛽︎",
+	"◎◉": "◎◉ ",
+	"◉": "◉ ",
+};
 
 /* ------------------------------------------------------------------ */
 /*  persistence                                                        */
@@ -191,6 +196,70 @@ function writeCostCurrency(ccy: string): void {
 		writeFileSync(
 			STATE_FILE,
 			JSON.stringify({ ...prev, costCurrency: ccy }),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
+function readBalanceSymbol(): string {
+	try {
+		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+		const s: string = raw?.balanceSymbol;
+		if (s) return s;
+	} catch {
+		/* no-op */
+	}
+	return "⛽";
+}
+
+function readBalanceSymbolList(): string[] {
+	try {
+		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+		if (Array.isArray(raw?.balanceSymbols)) return raw.balanceSymbols;
+	} catch {
+		/* no-op */
+	}
+	return [];
+}
+
+function writeBalanceSymbolList(syms: string[]): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, balanceSymbols: syms }),
+			"utf-8",
+		);
+	} catch {
+		/* no-op */
+	}
+}
+
+function getEffectiveSymbols(): string[] {
+	const builtin = Object.keys(BALANCE_SYMBOL_OPTIONS);
+	const custom = readBalanceSymbolList();
+	const seen = new Set(builtin);
+	for (const s of custom) {
+		if (!seen.has(s)) builtin.push(s);
+		seen.add(s);
+	}
+	return builtin;
+}
+
+function writeBalanceSymbol(sym: string): void {
+	try {
+		const prev: any = existsSync(STATE_FILE)
+			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
+			: {};
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(
+			STATE_FILE,
+			JSON.stringify({ ...prev, balanceSymbol: sym }),
 			"utf-8",
 		);
 	} catch {
@@ -464,6 +533,7 @@ function makeFooter(
 	thresholds: { warn: number; alert: number },
 	costThresholds: { warn: number; alert: number },
 	extensionOrder: string[],
+	balanceSymbol: string,
 ) {
 	let disposed = false;
 	let gitTokens = "";
@@ -593,7 +663,7 @@ function makeFooter(
 					balanceText = "";
 					balanceProvider = "";
 				} else if (value !== undefined) {
-					balanceText = `¤¥${value}`;
+					balanceText = `${balanceSymbol}${value}`;
 					balanceStale = false;
 				} else {
 					balanceText = "";
@@ -718,7 +788,9 @@ function makeFooter(
 			const balanceProviderVal = ctx.model?.provider;
 			let balanceSeg = "";
 			if (balanceTextVal && balanceProviderVal === balanceProvider) {
-				const rawNum = Number.parseFloat(balanceTextVal.slice(2));
+				const rawNum = Number.parseFloat(
+					balanceTextVal.slice(balanceSymbol.length),
+				);
 				const srcCcy = BALANCE_PROVIDERS[balanceProvider]?.currency;
 				let displayNum = rawNum;
 				const rate = ccyRate(costCurrency, fxCache?.rates);
@@ -736,9 +808,11 @@ function makeFooter(
 							? "warning"
 							: "dim";
 				const info = CURRENCIES[costCurrency] ?? CURRENCIES.USD;
+				const displayPrefix =
+					BALANCE_SYMBOL_OPTIONS[balanceSymbol] ?? balanceSymbol;
 				const formatted = Number.isFinite(displayNum)
-					? `${info.symbol}${displayNum.toFixed(info.decimals)}`
-					: `${info.symbol}--`;
+					? `${displayPrefix}${info.symbol}${displayNum.toFixed(info.decimals)}`
+					: `${displayPrefix}${info.symbol}--`;
 				balanceSeg = `  ${theme.fg(color, formatted + (balanceStale ? "?" : ""))}`;
 			}
 			const rw =
@@ -786,23 +860,20 @@ function makeFooter(
 						return oa !== ob ? oa - ob : a.localeCompare(b);
 					})
 					.map(([k, v]) => {
+						let s = v.trim();
 						if (k === "caveman") {
-							const s = v
+							s = s
 								.replace("caveman level:", "Caveman:")
 								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
-							return [k, s] as [string, string];
-						}
-						if (k === "ponytail") {
-							const s = v
+						} else if (k === "ponytail") {
+							s = s
 								.replace("⚡ ", "")
-								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase())
-								.replace(
-									" 🐴 \x1b[38;2;128;128;128mponytail:",
-									" 🐴\x1b[38;2;128;128;128mponytail:",
-								);
-							return [k, s] as [string, string];
+								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
 						}
-						return [k, v.trim()] as [string, string];
+						return [k, s.replace(/(\p{Extended_Pictographic})\s+/gu, "$1")] as [
+							string,
+							string,
+						];
 					});
 				extItems.push(...sorted);
 			}
@@ -823,10 +894,12 @@ function makeFooter(
 					let current = "";
 					for (const [, text] of extItems) {
 						// MCP colour rewrite
-						const seg = text.replace(
-							/MCP:/,
-							`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
-						);
+						const seg = text
+							.replace("servers ", "")
+							.replace(
+								/MCP:/,
+								`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
+							);
 						const test = current ? `${current} ${seg}` : seg;
 						if (visibleWidth(test) > width) {
 							if (current) lines.push(current);
@@ -844,10 +917,12 @@ function makeFooter(
 				} else {
 					const statusLine = extItems
 						.map(([, t]) =>
-							t.replace(
-								/MCP:/,
-								`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
-							),
+							t
+								.replace("servers ", "")
+								.replace(
+									/MCP:/,
+									`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
+								),
 						)
 						.join(" ");
 					lines.push(
@@ -881,6 +956,7 @@ export default function (pi: any) {
 		const thresholds = readThresholds();
 		const costThresholds = readCostThresholds();
 		const extensionOrder = readExtensionOrder();
+		const balanceSymbol = readBalanceSymbol();
 		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
 			makeFooter(
 				ctx,
@@ -892,6 +968,7 @@ export default function (pi: any) {
 				thresholds,
 				costThresholds,
 				extensionOrder,
+				balanceSymbol,
 			),
 		);
 	}
@@ -956,25 +1033,35 @@ export default function (pi: any) {
 	});
 
 	pi.registerCommand("tf", {
-		description: "Toggle pi-tidy-footer on / off",
+		description: "Toggle pi-tidy-footer ENABLED/DISABLED",
 		handler: async (_args: string, ctx: any) => {
 			enabled = !enabled;
 			writePersistedEnabled(enabled);
 
 			if (enabled) {
 				applyFooter(ctx);
-				ctx.ui.notify("Cost-free footer ON", "info");
+				ctx.ui.notify("Tidy footer: ENABLED", "info");
 			} else {
 				ctx.ui.setFooter(undefined);
-				ctx.ui.notify("Default footer restored", "info");
+				ctx.ui.notify(
+					"Tidy footer: DISABLED. Config saved, /tf to re-enable.",
+					"info",
+				);
 			}
 		},
 	});
 
 	pi.registerCommand("sc", {
 		description:
-			"Switch currency for balance and cost display (no args = list, /sc <code> = set)",
+			"Currency for balance and cost: /sc <code> = set; no args = show",
 		handler: async (args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
 			const ccy = args.trim().toUpperCase();
 			if (!ccy) {
 				const current = readCostCurrency();
@@ -987,7 +1074,10 @@ export default function (pi: any) {
 			}
 			if (!CURRENCIES[ccy]) {
 				const list = CCY_LIST;
-				ctx.ui.notify(`Unknown currency: ${ccy}. Available: ${list}`, "error");
+				ctx.ui.notify(
+					`Invalid currency: "${ccy}". Available: ${list}`,
+					"error",
+				);
 				return;
 			}
 			writeCostCurrency(ccy);
@@ -1001,8 +1091,15 @@ export default function (pi: any) {
 
 	pi.registerCommand("bt", {
 		description:
-			"Balance thresholds (no args = show, <warn> <alert> = set, warn > alert)",
+			"Balance thresholds: <warn> <alert> = set (warn > alert); no args = show",
 		handler: async (args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
 			const parts = args.trim().split(/\s+/);
 			if (!args.trim()) {
 				const t = readThresholds();
@@ -1027,7 +1124,7 @@ export default function (pi: any) {
 				const fxCache = readFxCache();
 				const rate = ccyRate(ccy, fxCache?.rates);
 				ctx.ui.notify(
-					`Usage: /bt <warn> <alert> (warn > alert). Default: ${(4.14 * rate).toFixed(2)} ${(1.38 * rate).toFixed(2)} (${ccy})`,
+					`Usage: /bt <warn> <alert> — warn must be greater than alert. Default: ${(4.14 * rate).toFixed(2)} ${(1.38 * rate).toFixed(2)} (${ccy})`,
 					"error",
 				);
 				return;
@@ -1044,10 +1141,98 @@ export default function (pi: any) {
 		},
 	});
 
+	pi.registerCommand("bs", {
+		description:
+			"Balance symbol: no args = cycle; <symbol> = set; -d <symbol> = delete",
+		handler: async (args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
+			if (args.startsWith("-d") && args.length > 2) {
+				let sym = args.slice(args[2] === " " ? 3 : 2);
+				if (sym.startsWith('"') && sym.endsWith('"')) {
+					sym = sym.slice(1, -1);
+				}
+				if (!sym) {
+					ctx.ui.notify("Usage: /bs -d <symbol>", "error");
+					return;
+				}
+				const custom = readBalanceSymbolList();
+				const idx = custom.indexOf(sym);
+				if (idx === -1) {
+					ctx.ui.notify(
+						`Invalid symbol: "${sym}". Use /bs -l to list available symbols.`,
+						"error",
+					);
+					return;
+				}
+				custom.splice(idx, 1);
+				writeBalanceSymbolList(custom);
+				if (readBalanceSymbol() === sym) {
+					writeBalanceSymbol("⛽");
+				}
+				if (enabled) applyFooter(ctx);
+				const display = sym.endsWith(" ")
+					? sym.trimEnd() + " (with trailing space)"
+					: sym;
+				ctx.ui.notify(`Deleted symbol: ${display}`, "info");
+				return;
+			}
+			if (args.trim() === "-l") {
+				const keys = getEffectiveSymbols();
+				ctx.ui.notify(
+					`Balance Symbols: ${keys.map((k) => BALANCE_SYMBOL_OPTIONS[k] ?? k).join(" ")}`,
+					"info",
+				);
+				return;
+			}
+			const trimmed = args.trim();
+			if (!trimmed) {
+				const keys = getEffectiveSymbols();
+				const current = readBalanceSymbol();
+				const idx = keys.indexOf(current);
+				const next = keys[(idx + 1) % keys.length];
+				writeBalanceSymbol(next);
+				if (enabled) applyFooter(ctx);
+				const display = BALANCE_SYMBOL_OPTIONS[next] ?? next;
+				ctx.ui.notify(`Balance symbol: ${display}`, "info");
+			} else {
+				let sym = args;
+				if (
+					args.length >= 2 &&
+					args[0] === '"' &&
+					args[args.length - 1] === '"'
+				) {
+					sym = args.slice(1, -1);
+				}
+				const custom = readBalanceSymbolList();
+				if (!custom.includes(sym)) {
+					custom.push(sym);
+					writeBalanceSymbolList(custom);
+				}
+				writeBalanceSymbol(sym);
+				if (enabled) applyFooter(ctx);
+				const display = BALANCE_SYMBOL_OPTIONS[sym] ?? sym;
+				ctx.ui.notify(`Balance symbol: ${display}`, "info");
+			}
+		},
+	});
+
 	pi.registerCommand("ct", {
 		description:
-			"Cost thresholds (no args = show, <warn> <alert> = set, warn < alert)",
+			"Cost thresholds: <warn> <alert> = set (warn < alert); no args = show",
 		handler: async (args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
 			const parts = args.trim().split(/\s+/);
 			if (!args.trim()) {
 				const t = readCostThresholds();
@@ -1072,7 +1257,7 @@ export default function (pi: any) {
 				const fxCache = readFxCache();
 				const rate = ccyRate(ccy, fxCache?.rates);
 				ctx.ui.notify(
-					`Usage: /ct <warn> <alert> (warn < alert). Default: ${(1 * rate).toFixed(2)} ${(3 * rate).toFixed(2)} (${ccy})`,
+					`Usage: /ct <warn> <alert> — warn must be less than alert. Default: ${(1 * rate).toFixed(2)} ${(3 * rate).toFixed(2)} (${ccy})`,
 					"error",
 				);
 				return;
@@ -1090,29 +1275,43 @@ export default function (pi: any) {
 	});
 
 	pi.registerCommand("es", {
-		description: "Extension sort (no args = show order, keys = set order)",
+		description: "Extension sort: keys = set order; no args = show order",
 		handler: async (args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
 			const trimmed = args.trim();
 			if (!trimmed) {
 				const current = readExtensionOrder();
-				ctx.ui.notify(`Extension order: ${current.join(" ")}`, "info");
+				ctx.ui.notify(`Current order: ${current.join(" ")}`, "info");
 				return;
 			}
 			const keys = trimmed.split(/\s+/);
 			writeExtensionOrder(keys);
 			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(`Extension order: ${keys.join(" ")}`, "info");
+			ctx.ui.notify(`Order set to: ${keys.join(" ")}`, "info");
 		},
 	});
 
 	pi.registerCommand("ew", {
-		description: "Toggle extension wrap (on/off)",
+		description: "Toggle extension wrap ON/OFF",
 		handler: async (_args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
 			const next = !readWrapEnabled();
 			writeWrapEnabled(next);
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(
-				next ? "Extension wrap ON" : "Extension wrap OFF (truncate)",
+				next ? "Extension wrap: ON" : "Extension wrap: OFF",
 				"info",
 			);
 		},
