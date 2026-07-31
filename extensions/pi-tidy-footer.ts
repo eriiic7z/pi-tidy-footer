@@ -3,7 +3,7 @@
  * Toggle with /tf. State persists across restarts.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -27,9 +27,17 @@ const CURRENCIES: Record<string, { symbol: string; decimals: number }> = {
 const CCY_LIST = Object.keys(CURRENCIES).join(" ");
 const BALANCE_SYMBOL_OPTIONS: Record<string, string> = {
 	"⛽": "⛽︎",
-	"◎◉": "◎◉ ",
-	"◉": "◉ ",
+	"◎◉": "◎◉",
+	"◉": "◉",
 };
+
+const FX_TTL_MS = 86_400_000;
+const GIT_TIMEOUT_MS = 3000;
+const GIT_DEBOUNCE_MS = 250;
+const GIT_POLL_MS = 30_000;
+const BALANCE_COOLDOWN_MS = 30_000;
+const STATUS_MIN_MS = 150;
+const FETCH_TIMEOUT_MS = 5000;
 
 /* ------------------------------------------------------------------ */
 /*  persistence                                                        */
@@ -38,271 +46,149 @@ const BALANCE_SYMBOL_OPTIONS: Record<string, string> = {
 const STATE_DIR = join(homedir(), ".pi", "agent", "extensions");
 const STATE_FILE = join(STATE_DIR, "pi-tidy-footer-state.json");
 
+let stateCache: Record<string, any> | null = null;
+
+function loadState(): Record<string, any> {
+	if (stateCache) return stateCache;
+	try {
+		stateCache = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
+	} catch {
+		stateCache = {};
+	}
+	return stateCache!;
+}
+
+function readState<T>(key: string, fallback: T): T {
+	const raw = loadState();
+	return raw?.[key] != null ? raw[key] : fallback;
+}
+
+function mergeState(patch: Record<string, any>): void {
+	const prev = loadState();
+	const next = { ...prev, ...patch };
+	try {
+		mkdirSync(STATE_DIR, { recursive: true });
+		writeFileSync(STATE_FILE, JSON.stringify(next), "utf-8");
+		Object.assign(prev, patch);
+	} catch (e) {
+		console.error("pi-tidy-footer: mergeState failed", e);
+	}
+}
+
 function readPersistedEnabled(): boolean {
-	try {
-		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).enabled !== false;
-	} catch {
-		return true;
-	}
-}
-
-function readThresholds(): { warn: number; alert: number } {
-	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-		let w = Number(raw?.balanceThresholdWarn);
-		let a = Number(raw?.balanceThresholdAlert);
-		if (!Number.isFinite(w) || !Number.isFinite(a) || w <= a) {
-			w = 4.14;
-			a = 1.38;
-		}
-		return { warn: w, alert: a };
-	} catch {
-		return { warn: 4.14, alert: 1.38 };
-	}
-}
-
-function writeThresholds(warn: number, alert: number): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({
-				...prev,
-				balanceThresholdWarn: warn,
-				balanceThresholdAlert: alert,
-			}),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
-}
-
-function readCostThresholds(): { warn: number; alert: number } {
-	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-		let w = Number(raw?.costThresholdWarn);
-		let a = Number(raw?.costThresholdAlert);
-		if (!Number.isFinite(w) || !Number.isFinite(a) || w >= a) {
-			w = 1;
-			a = 3;
-		}
-		return { warn: w, alert: a };
-	} catch {
-		return { warn: 1, alert: 3 };
-	}
-}
-
-function writeCostThresholds(warn: number, alert: number): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({
-				...prev,
-				costThresholdWarn: warn,
-				costThresholdAlert: alert,
-			}),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	return readState("enabled", true);
 }
 
 function writePersistedEnabled(enabled: boolean): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(STATE_FILE, JSON.stringify({ ...prev, enabled }), "utf-8");
-	} catch {
-		/* no-op */
+	mergeState({ enabled });
+}
+
+function readThresholds(): { warn: number; alert: number } {
+	let w = readState<number>("balanceThresholdWarn", 4.14);
+	let a = readState<number>("balanceThresholdAlert", 1.38);
+	if (!Number.isFinite(w) || !Number.isFinite(a) || w <= a) {
+		w = 4.14;
+		a = 1.38;
 	}
+	return { warn: w, alert: a };
+}
+
+function writeThresholds(warn: number, alert: number): void {
+	mergeState({ balanceThresholdWarn: warn, balanceThresholdAlert: alert });
+}
+
+function readCostThresholds(): { warn: number; alert: number } {
+	let w = readState<number>("costThresholdWarn", 1);
+	let a = readState<number>("costThresholdAlert", 3);
+	if (!Number.isFinite(w) || !Number.isFinite(a) || w >= a) {
+		w = 1;
+		a = 3;
+	}
+	return { warn: w, alert: a };
+}
+
+function writeCostThresholds(warn: number, alert: number): void {
+	mergeState({ costThresholdWarn: warn, costThresholdAlert: alert });
 }
 
 function readWrapEnabled(): boolean {
-	try {
-		return JSON.parse(readFileSync(STATE_FILE, "utf-8")).wrapEnabled === true;
-	} catch {
-		return false;
-	}
+	return readState("wrapEnabled", false);
 }
 
 function writeWrapEnabled(wrap: boolean): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, wrapEnabled: wrap }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	mergeState({ wrapEnabled: wrap });
 }
 
 function readExtensionOrder(): string[] {
-	const fallback = ["caveman", "ponytail", "mcp", "pi-lens-lsp"];
-	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-		return Array.isArray(raw?.extensionOrder) ? raw.extensionOrder : fallback;
-	} catch {
-		return fallback;
-	}
+	return readState("extensionOrder", [
+		"caveman",
+		"ponytail",
+		"mcp",
+		"pi-lens-lsp",
+	]);
 }
 
 function writeExtensionOrder(order: string[]): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, extensionOrder: order }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	mergeState({ extensionOrder: order });
 }
 
 function readCostCurrency(): string {
-	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-		return CURRENCIES[raw?.costCurrency] ? raw.costCurrency : "USD";
-	} catch {
-		return "USD";
-	}
+	const ccy = readState("costCurrency", "");
+	return CURRENCIES[ccy] ? ccy : "USD";
 }
 
 function writeCostCurrency(ccy: string): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, costCurrency: ccy }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	mergeState({ costCurrency: ccy });
 }
 
 function readBalanceSymbol(): string {
-	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-		const s: string = raw?.balanceSymbol;
-		if (s) return s;
-	} catch {
-		/* no-op */
-	}
-	return "⛽";
+	return readState("balanceSymbol", "⛽");
 }
 
 function readBalanceSymbolList(): string[] {
-	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-		if (Array.isArray(raw?.balanceSymbols)) return raw.balanceSymbols;
-	} catch {
-		/* no-op */
-	}
-	return [];
+	return readState<string[]>("balanceSymbols", []);
 }
 
 function writeBalanceSymbolList(syms: string[]): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, balanceSymbols: syms }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	mergeState({ balanceSymbols: syms });
 }
 
 function getEffectiveSymbols(): string[] {
-	const builtin = Object.keys(BALANCE_SYMBOL_OPTIONS);
+	const result = [...Object.keys(BALANCE_SYMBOL_OPTIONS)];
 	const custom = readBalanceSymbolList();
-	const seen = new Set(builtin);
+	const seen = new Set(result);
 	for (const s of custom) {
-		if (!seen.has(s)) builtin.push(s);
+		if (!seen.has(s)) result.push(s);
 		seen.add(s);
 	}
-	return builtin;
+	return result;
 }
 
 function writeBalanceSymbol(sym: string): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, balanceSymbol: sym }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	mergeState({ balanceSymbol: sym });
 }
 
 function readFxCache(): {
 	rates: Record<string, number>;
 	fetchedAt: number;
 } | null {
-	try {
-		const cache = JSON.parse(readFileSync(STATE_FILE, "utf-8")).fxCache;
-		if (cache?.rates && cache?.fetchedAt) return cache;
-		return null;
-	} catch {
-		return null;
-	}
+	const cache = readState<any>("fxCache", null);
+	if (cache?.rates && cache?.fetchedAt) return cache;
+	return null;
 }
 
 function writeFxCache(cache: {
 	rates: Record<string, number>;
 	fetchedAt: number;
 }): void {
-	try {
-		const prev: any = existsSync(STATE_FILE)
-			? JSON.parse(readFileSync(STATE_FILE, "utf-8"))
-			: {};
-		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(
-			STATE_FILE,
-			JSON.stringify({ ...prev, fxCache: cache }),
-			"utf-8",
-		);
-	} catch {
-		/* no-op */
-	}
+	mergeState({ fxCache: cache });
 }
 
 function getApiKey(provider: string): string | undefined {
 	try {
 		return (JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as any)[provider]?.key;
-	} catch {
+	} catch (e) {
+		console.error("pi-tidy-footer: getApiKey failed", e);
 		return undefined;
 	}
 }
@@ -314,10 +200,7 @@ const BALANCE_PROVIDERS: Record<
 	deepseek: {
 		url: "https://api.deepseek.com/user/balance",
 		currency: "CNY",
-		parse: (data) => {
-			const v = data?.balance_infos?.[0]?.total_balance;
-			return v != null ? parseFloat(v).toFixed(2) : undefined;
-		},
+		parse: (data) => safeBalance(data?.balance_infos?.[0]?.total_balance),
 	},
 	"moonshotai-cn": {
 		url: "https://api.moonshot.cn/v1/users/me/balance",
@@ -339,30 +222,26 @@ const BALANCE_PROVIDERS: Record<
 	openrouter: {
 		url: "https://openrouter.ai/api/v1/credits",
 		currency: "USD",
-		parse: (data) => {
-			const v = data?.data?.total_credits;
-			return v != null ? parseFloat(v).toFixed(2) : undefined;
-		},
+		parse: (data) => safeBalance(data?.data?.total_credits),
 	},
 	siliconflow: {
 		url: "https://api.siliconflow.cn/v1/user/info",
 		currency: "CNY",
-		parse: (data) => {
-			const v = data?.data?.balance;
-			return v != null ? parseFloat(v).toFixed(2) : undefined;
-		},
+		parse: (data) => safeBalance(data?.data?.balance),
 	},
 	zhipu: {
 		url: "https://open.bigmodel.cn/api/paas/v4/account/billing",
 		currency: "CNY",
-		parse: (data) => {
-			const v = data?.balance;
-			return v != null ? parseFloat(v).toFixed(2) : undefined;
-		},
+		parse: (data) => safeBalance(data?.balance),
 	},
 };
 
 const BALANCE_PROVIDER_KEYS = new Set(Object.keys(BALANCE_PROVIDERS));
+
+function safeBalance(v: unknown): string | undefined {
+	const n = Number(v);
+	return Number.isFinite(n) ? n.toFixed(2) : undefined;
+}
 
 async function fetchBalance(
 	provider: string,
@@ -372,6 +251,7 @@ async function fetchBalance(
 	if (!cfg) return undefined;
 	const resp = await fetch(cfg.url, {
 		headers: { Authorization: `Bearer ${key}` },
+		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 	});
 	if (!resp.ok) return undefined;
 	const data = (await resp.json()) as any;
@@ -385,9 +265,9 @@ async function fetchBalance(
 function ccyRate(
 	ccy: string,
 	rates: Record<string, number> | null | undefined,
-): number {
+): number | undefined {
 	if (ccy === "USD") return 1;
-	return rates?.[ccy.toLowerCase()] ?? 1;
+	return rates?.[ccy.toLowerCase()] ?? undefined;
 }
 
 function fmtTok(n: number): string {
@@ -402,10 +282,7 @@ function fmtCwd(cwd: string, home: string | undefined): string {
 	const rc = resolve(cwd);
 	const rh = resolve(home);
 	const rel = relative(rh, rc);
-	if (
-		rel === "" ||
-		(rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
-	)
+	if (!rel.startsWith("..") && !isAbsolute(rel))
 		return rel === "" ? "~" : `~${sep}${rel}`;
 	return cwd;
 }
@@ -421,16 +298,31 @@ function fmtCost(
 	costThresholds: { warn: number; alert: number },
 ): { text: string; color: string } {
 	const rate = ccyRate(ccy, fx);
-	const cost =
-		(inp / 1_000_000) * (model.cost?.input ?? 0) +
-		(out / 1_000_000) * (model.cost?.output ?? 0) +
-		(cr / 1_000_000) * (model.cost?.cacheRead ?? 0) +
-		(cw / 1_000_000) * (model.cost?.cacheWrite ?? 0);
-	const local = cost * rate;
 	const info = CURRENCIES[ccy] ?? CURRENCIES.USD;
+	if (rate === undefined) {
+		return { text: `${info.symbol}--`, color: "dim" };
+	}
+	const hasCost =
+		model.cost?.input != null ||
+		model.cost?.output != null ||
+		model.cost?.cacheRead != null ||
+		model.cost?.cacheWrite != null;
+	const cost = hasCost
+		? (inp / 1_000_000) * (model.cost?.input ?? 0) +
+			(out / 1_000_000) * (model.cost?.output ?? 0) +
+			(cr / 1_000_000) * (model.cost?.cacheRead ?? 0) +
+			(cw / 1_000_000) * (model.cost?.cacheWrite ?? 0)
+		: undefined;
+	if (cost === undefined) {
+		return {
+			text: `${info.symbol}--`,
+			color: "dim",
+		};
+	}
+	const local = cost * rate;
 	const tWarn = costThresholds.warn * rate;
 	const tAlert = costThresholds.alert * rate;
-	const color = local > tAlert ? "error" : local > tWarn ? "warning" : "dim";
+	const color = thresholdColor(local, tWarn, tAlert, "higher");
 	return {
 		text: `${info.symbol}${local.toFixed(info.decimals)}`,
 		color,
@@ -487,6 +379,18 @@ function parseGitStatusTokens(stdout: string): string {
 /*  tool activity                                                      */
 /* ------------------------------------------------------------------ */
 
+function thresholdColor(
+	value: number,
+	warn: number,
+	alert: number,
+	direction: "higher" | "lower",
+): string {
+	if (direction === "higher") {
+		return value > alert ? "error" : value > warn ? "warning" : "dim";
+	}
+	return value < alert ? "error" : value < warn ? "warning" : "dim";
+}
+
 interface ToolActivityState {
 	active: Map<string, number>;
 	minDisplayQueue: string[];
@@ -497,6 +401,7 @@ interface LiveHooks {
 	requestRender: (() => void) | undefined;
 	refreshGit: (() => void) | undefined;
 	refreshBalance: (() => void) | undefined;
+	getThinkingLevel: (() => string) | undefined;
 }
 
 function formatToolActivity(state: ToolActivityState): string {
@@ -539,12 +444,17 @@ function makeFooter(
 	let gitTokens = "";
 	let gitInFlight = false;
 	let gitQueued = false;
+	let gitRetryCount = 0;
 	let gitDebounce: ReturnType<typeof setTimeout> | undefined;
 	let balanceText = "";
 	let balanceProvider = "";
 	let balanceStale = false;
 	let balanceLastFetch = 0;
 	let balanceInFlight = false;
+
+	let cachedExtItems: [string, string][] | null = null;
+	let lastRawStatuses = "";
+	let cachedMcpRgb = "";
 
 	const wrapEnabled = readWrapEnabled();
 
@@ -553,10 +463,12 @@ function makeFooter(
 
 	const refreshFx = () => {
 		if (disposed) return;
+		if (fxCache && Date.now() - fxCache.fetchedAt <= FX_TTL_MS) return;
 		void (async () => {
 			try {
 				const resp = await fetch(
 					"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/usd.min.json",
+					{ signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
 				);
 				const data = (await resp.json()) as any;
 				const rates: Record<string, number> = data?.usd ?? {};
@@ -565,13 +477,14 @@ function makeFooter(
 				fxCache = { rates, fetchedAt: Date.now() };
 				writeFxCache(fxCache);
 				if (!disposed) tui.requestRender();
-			} catch {
+			} catch (e) {
+				console.error("pi-tidy-footer: refreshFx failed", e);
 				/* keep old cache */
 			}
 		})();
 	};
 
-	if (!fxCache || Date.now() - fxCache.fetchedAt > 86_400_000) {
+	if (!fxCache) {
 		refreshFx();
 	}
 
@@ -593,12 +506,13 @@ function makeFooter(
 						"--branch",
 						"--untracked-files=normal",
 					],
-					{ cwd: ctx.sessionManager.getCwd(), timeout: 3000 },
+					{ cwd: ctx.sessionManager.getCwd(), timeout: GIT_TIMEOUT_MS },
 				);
 				gitTokens =
 					result.code === 0 && !result.killed
 						? parseGitStatusTokens(result.stdout)
 						: "";
+				gitRetryCount = 0;
 			} catch {
 				gitTokens = "";
 			} finally {
@@ -606,7 +520,10 @@ function makeFooter(
 				if (!disposed) tui.requestRender();
 				if (gitQueued) {
 					gitQueued = false;
-					runGitStatus();
+					if (gitRetryCount < 3) {
+						gitRetryCount++;
+						runGitStatus();
+					}
 				}
 			}
 		})();
@@ -618,7 +535,7 @@ function makeFooter(
 		gitDebounce = setTimeout(() => {
 			gitDebounce = undefined;
 			runGitStatus();
-		}, 250);
+		}, GIT_DEBOUNCE_MS);
 	};
 
 	const unsub = fd.onBranchChange(() => {
@@ -626,7 +543,7 @@ function makeFooter(
 		refreshGit();
 		tui.requestRender();
 	});
-	const gitInterval = setInterval(runGitStatus, 30000);
+	const gitInterval = setInterval(runGitStatus, GIT_POLL_MS);
 	live.requestRender = () => tui.requestRender();
 	live.refreshGit = refreshGit;
 	runGitStatus();
@@ -644,14 +561,13 @@ function makeFooter(
 		const now = Date.now();
 		if (
 			balanceLastFetch > 0 &&
-			now - balanceLastFetch < 30_000 &&
+			now - balanceLastFetch < BALANCE_COOLDOWN_MS &&
 			balanceProvider === provider
 		) {
 			// still fresh
 			return;
 		}
 		balanceProvider = provider;
-		balanceLastFetch = now;
 		if (balanceInFlight) return;
 		const key = getApiKey(provider);
 		if (!key) return;
@@ -663,13 +579,15 @@ function makeFooter(
 					balanceText = "";
 					balanceProvider = "";
 				} else if (value !== undefined) {
+					balanceLastFetch = now;
 					balanceText = `${balanceSymbol}${value}`;
 					balanceStale = false;
 				} else {
 					balanceText = "";
 					balanceProvider = "";
 				}
-			} catch {
+			} catch (e) {
+				console.error("pi-tidy-footer: fetchBalance failed", e);
 				if (!disposed && ctx.model?.provider === provider) {
 					if (balanceText) balanceStale = true;
 					else {
@@ -695,243 +613,250 @@ function makeFooter(
 			live.requestRender = undefined;
 			live.refreshGit = undefined;
 			live.refreshBalance = undefined;
+			live.getThinkingLevel = undefined;
 		},
 		render(width: number): string[] {
-			const session = ctx.sessionManager;
-			/* token stats — cost intentionally omitted */
-			let inp = 0,
-				out = 0,
-				cr = 0,
-				cw = 0;
-			let hitRate: number | undefined;
-			for (const e of session.getBranch()) {
-				if (e.type === "message" && e.message.role === "assistant") {
-					const msg = e.message as AssistantMessage;
-					inp += msg.usage.input;
-					out += msg.usage.output;
-					cr += msg.usage.cacheRead;
-					cw += msg.usage.cacheWrite;
-					const prompt =
-						msg.usage.input + msg.usage.cacheRead + msg.usage.cacheWrite;
-					hitRate =
-						prompt > 0 ? (msg.usage.cacheRead / prompt) * 100 : undefined;
-				}
-			}
-
-			/* context usage */
-			const cu = ctx.getContextUsage();
-			const ctxWin = cu?.contextWindow ?? ctx.model?.contextWindow ?? 0;
-			const pct = cu?.percent ?? 0;
-			const pctStr = cu?.percent != null ? pct.toFixed(1) : "?";
-
-			/* pwd / git */
-			let pwd = fmtCwd(
-				session.getCwd(),
-				process.env.HOME || process.env.USERPROFILE,
-			);
-			const gitBranch = fd.getGitBranch();
-			if (gitBranch)
-				pwd = gitTokens
-					? `${pwd} (${gitBranch} ${gitTokens})`
-					: `${pwd} (${gitBranch})`;
-			const sname = session.getSessionName();
-			if (sname) pwd = `${pwd} • ${sname}`;
-
-			/* stats line */
-			const parts: string[] = [];
-			if (inp) parts.push(`↑${fmtTok(inp)}`);
-			if (out) parts.push(`↓${fmtTok(out)}`);
-			if (cr) parts.push(`R${fmtTok(cr)}`);
-			if (cw) parts.push(`W${fmtTok(cw)}`);
-			if ((cr || cw) && hitRate !== undefined)
-				parts.push(`CH${hitRate.toFixed(1)}%`);
-			const ctxPctDisp =
-				pctStr === "?" ? `?/${fmtTok(ctxWin)}` : `${pctStr}%/${fmtTok(ctxWin)}`;
-			const ctxPctStr = theme.fg("dim", ctxPctDisp);
-			parts.push(ctxPctStr);
-			const result = fmtCost(
-				inp,
-				out,
-				cr,
-				cw,
-				ctx.model,
-				costCurrency,
-				fxCache?.rates ?? null,
-				costThresholds,
-			);
-			parts.push(theme.fg(result.color, result.text));
-
-			let left = parts.join(" ");
-			let lw = visibleWidth(left);
-			if (lw > width) left = truncateToWidth(left, width, "...");
-			lw = visibleWidth(left);
-
-			/* model / thinking — get thinking level from session entries (mirrors native footer) */
-			const mName = ctx.model?.id || "no-model";
-			let right = mName;
-			if (ctx.model?.reasoning) {
-				let tl = "off";
-				// Walk session branch backwards for most recent thinking_level_change
-				const branch = session.getBranch();
-				for (let i = branch.length - 1; i >= 0; i--) {
-					const e = branch[i];
-					if (e.type === "thinking_level_change") {
-						tl = (e as any).thinkingLevel || "off";
-						break;
+			try {
+				const session = ctx.sessionManager;
+				/* token stats — cost intentionally omitted */
+				let inp = 0,
+					out = 0,
+					cr = 0,
+					cw = 0;
+				let hitRate: number | undefined;
+				for (const e of session.getBranch()) {
+					if (e.type === "message" && e.message.role === "assistant") {
+						const msg = e.message as AssistantMessage;
+						inp += msg.usage.input;
+						out += msg.usage.output;
+						cr += msg.usage.cacheRead;
+						cw += msg.usage.cacheWrite;
+						const prompt =
+							msg.usage.input + msg.usage.cacheRead + msg.usage.cacheWrite;
+						hitRate =
+							prompt > 0 ? (msg.usage.cacheRead / prompt) * 100 : undefined;
 					}
 				}
-				right = tl === "off" ? `${mName} • thinking off` : `${mName} • ${tl}`;
-			}
-			const toolText = formatToolActivity(toolState);
-			const toolSeg = toolText ? `${theme.fg("accent", toolText)}  ` : "";
-			const balanceTextVal = balanceText;
-			const balanceProviderVal = ctx.model?.provider;
-			let balanceSeg = "";
-			if (balanceTextVal && balanceProviderVal === balanceProvider) {
-				const rawNum = Number.parseFloat(
-					balanceTextVal.slice(balanceSymbol.length),
+
+				/* context usage */
+				const cu = ctx.getContextUsage();
+				const ctxWin = cu?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+				const pct = cu?.percent ?? 0;
+				const pctStr = cu?.percent != null ? pct.toFixed(1) : "?";
+
+				/* pwd / git */
+				let pwd = fmtCwd(
+					session.getCwd(),
+					process.env.HOME || process.env.USERPROFILE,
 				);
-				const srcCcy = BALANCE_PROVIDERS[balanceProvider]?.currency;
-				let displayNum = rawNum;
-				const rate = ccyRate(costCurrency, fxCache?.rates);
-				if (srcCcy && costCurrency !== srcCcy && fxCache) {
-					const srcRate = ccyRate(srcCcy, fxCache?.rates);
-					displayNum = (rawNum / srcRate) * rate;
+				const gitBranch = fd.getGitBranch();
+				if (gitBranch)
+					pwd = gitTokens
+						? `${pwd} (${gitBranch} ${gitTokens})`
+						: `${pwd} (${gitBranch})`;
+				const sname = session.getSessionName();
+				if (sname) pwd = `${pwd} • ${sname}`;
+
+				/* stats line */
+				const parts: string[] = [];
+				if (inp) parts.push(`↑${fmtTok(inp)}`);
+				if (out) parts.push(`↓${fmtTok(out)}`);
+				if (cr) parts.push(`R${fmtTok(cr)}`);
+				if (cw) parts.push(`W${fmtTok(cw)}`);
+				if ((cr || cw) && hitRate !== undefined)
+					parts.push(`CH${hitRate.toFixed(1)}%`);
+				const ctxPctDisp =
+					pctStr === "?"
+						? `?/${fmtTok(ctxWin)}`
+						: `${pctStr}%/${fmtTok(ctxWin)}`;
+				const ctxPctStr = theme.fg("dim", ctxPctDisp);
+				parts.push(ctxPctStr);
+				const result = fmtCost(
+					inp,
+					out,
+					cr,
+					cw,
+					ctx.model,
+					costCurrency,
+					fxCache?.rates ?? null,
+					costThresholds,
+				);
+				parts.push(theme.fg(result.color, result.text));
+
+				let left = parts.join(" ");
+				let lw = visibleWidth(left);
+				if (lw > width) left = truncateToWidth(left, width, "...");
+				lw = visibleWidth(left);
+
+				/* model / thinking */
+				const mName = ctx.model?.id || "no-model";
+				let right = mName;
+				if (ctx.model?.reasoning) {
+					const tl = live.getThinkingLevel?.() ?? "off";
+					right = tl === "off" ? `${mName} • thinking off` : `${mName} • ${tl}`;
 				}
-				const tWarn = thresholds.warn * rate;
-				const tAlert = thresholds.alert * rate;
-				const color = !Number.isFinite(displayNum)
-					? "dim"
-					: displayNum < tAlert
-						? "error"
-						: displayNum < tWarn
-							? "warning"
-							: "dim";
-				const info = CURRENCIES[costCurrency] ?? CURRENCIES.USD;
-				const displayPrefix =
-					BALANCE_SYMBOL_OPTIONS[balanceSymbol] ?? balanceSymbol;
-				const formatted = Number.isFinite(displayNum)
-					? `${displayPrefix}${info.symbol}${displayNum.toFixed(info.decimals)}`
-					: `${displayPrefix}${info.symbol}--`;
-				balanceSeg = `  ${theme.fg(color, formatted + (balanceStale ? "?" : ""))}`;
-			}
-			const rw =
-				visibleWidth(right) +
-				(toolText ? visibleWidth(toolText) + 2 : 0) +
-				visibleWidth(balanceSeg);
-
-			const pad = width - lw - rw;
-			let line2: string;
-			if (pad >= 0) {
-				line2 =
-					theme.fg("dim", left) +
-					" ".repeat(pad) +
-					toolSeg +
-					theme.fg("dim", right) +
-					balanceSeg;
-			} else if (width - lw - 2 > 0) {
-				line2 =
-					theme.fg("dim", left) +
-					theme.fg(
-						"dim",
-						"  " +
-							truncateToWidth(
-								(toolText ? `${toolText}  ` : "") + right + balanceSeg,
-								width - lw - 2,
-								"",
-							),
+				const toolText = formatToolActivity(toolState);
+				const toolSeg = toolText ? `${theme.fg("accent", toolText)}  ` : "";
+				const balanceTextVal = balanceText;
+				const balanceProviderVal = ctx.model?.provider;
+				let balanceSeg = "";
+				if (
+					balanceTextVal &&
+					balanceProviderVal === balanceProvider &&
+					fxCache
+				) {
+					const rawNum = Number.parseFloat(
+						balanceTextVal.slice(balanceSymbol.length),
 					);
-			} else {
-				line2 = theme.fg("dim", left);
-			}
-
-			/* extension statuses — keep key for grouped wrapping */
-			const extItems: [string, string][] = [];
-			const raw = fd.getExtensionStatuses();
-			let mcpRgb = ""; // capture original MCP accent colour so theme changes work
-			if (raw.size > 0) {
-				const order = new Map<string, number>();
-				extensionOrder.forEach((key, i) => order.set(key, i));
-				const sorted = (Array.from(raw.entries()) as [string, string][])
-					.filter(([, v]) => v.trim())
-					.sort(([a], [b]) => {
-						const oa = order.get(a) ?? 99;
-						const ob = order.get(b) ?? 99;
-						return oa !== ob ? oa - ob : a.localeCompare(b);
-					})
-					.map(([k, v]) => {
-						let s = v.trim();
-						if (k === "caveman") {
-							s = s
-								.replace("caveman level:", "Caveman:")
-								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
-						} else if (k === "ponytail") {
-							s = s
-								.replace("⚡ ", "")
-								.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
+					const srcCcy = BALANCE_PROVIDERS[balanceProvider]?.currency;
+					let displayNum = rawNum;
+					const rate = ccyRate(costCurrency, fxCache?.rates);
+					if (rate === undefined) {
+						balanceSeg = "";
+					} else {
+						if (srcCcy && costCurrency !== srcCcy) {
+							const srcRate = ccyRate(srcCcy, fxCache?.rates);
+							if (srcRate !== undefined) {
+								displayNum = (rawNum / srcRate) * rate;
+							}
 						}
-						return [k, s.replace(/(\p{Extended_Pictographic})\s+/gu, "$1")] as [
-							string,
-							string,
-						];
-					});
-				extItems.push(...sorted);
-			}
+						const tWarn = thresholds.warn * rate;
+						const tAlert = thresholds.alert * rate;
+						const color = !Number.isFinite(displayNum)
+							? "dim"
+							: thresholdColor(displayNum, tWarn, tAlert, "lower");
+						const info = CURRENCIES[costCurrency] ?? CURRENCIES.USD;
+						const displayPrefix =
+							(BALANCE_SYMBOL_OPTIONS[balanceSymbol] ?? balanceSymbol) + " ";
+						const formatted = Number.isFinite(displayNum)
+							? `${displayPrefix}${info.symbol}${displayNum.toFixed(info.decimals)}`
+							: `${displayPrefix}${info.symbol}--`;
+						balanceSeg = `  ${theme.fg(color, formatted + (balanceStale ? "?" : ""))}`;
+					}
+				}
+				const rw =
+					visibleWidth(right) +
+					(toolText ? visibleWidth(toolText) + 2 : 0) +
+					visibleWidth(balanceSeg);
 
-			// Extract original MCP accent RGB from the raw text before we strip colours
-			const rawMcp = raw.get("mcp");
-			if (rawMcp) {
-				const m = (rawMcp as string).match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
-				if (m) mcpRgb = `\x1b[38;2;${m[1]};${m[2]};${m[3]}m`;
-			}
+				const pad = width - lw - rw;
+				let line2: string;
+				if (pad >= 0) {
+					line2 =
+						theme.fg("dim", left) +
+						" ".repeat(pad) +
+						toolSeg +
+						theme.fg("dim", right) +
+						balanceSeg;
+				} else if (width - lw - 2 > 0) {
+					line2 =
+						theme.fg("dim", left) +
+						theme.fg(
+							"dim",
+							"  " +
+								truncateToWidth(
+									(toolText ? `${toolText}  ` : "") + right + balanceSeg,
+									width - lw - 2,
+									"",
+								),
+						);
+				} else {
+					line2 = theme.fg("dim", left);
+				}
 
-			const lines: string[] = [
-				truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")),
-				line2,
-			];
-			if (extItems.length > 0) {
-				if (wrapEnabled) {
-					let current = "";
-					for (const [, text] of extItems) {
-						// MCP colour rewrite
-						const seg = text
+				/* extension statuses — cache with serialized comparison */
+				const raw = fd.getExtensionStatuses();
+				const currentRaw = JSON.stringify([...raw.entries()]);
+				if (currentRaw !== lastRawStatuses) {
+					cachedExtItems = [];
+					cachedMcpRgb = "";
+					if (raw.size > 0) {
+						const order = new Map<string, number>();
+						extensionOrder.forEach((key, i) => order.set(key, i));
+						const sorted = (Array.from(raw.entries()) as [string, string][])
+							.filter(([, v]) => v.trim())
+							.sort(([a], [b]) => {
+								const oa = order.get(a) ?? 99;
+								const ob = order.get(b) ?? 99;
+								return oa !== ob ? oa - ob : a.localeCompare(b);
+							})
+							.map(([k, v]) => {
+								let s = v.trim();
+								if (k === "caveman") {
+									s = s
+										.replace("caveman level:", "Caveman:")
+										.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
+								} else if (k === "ponytail") {
+									s = s
+										.replace("⚡ ", "")
+										.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
+								}
+								return [
+									k,
+									s.replace(/(\p{Extended_Pictographic})\s+/gu, "$1"),
+								] as [string, string];
+							});
+						cachedExtItems.push(...sorted);
+					}
+					// Extract original MCP accent RGB from raw text before we strip colours
+					const rawMcp = raw.get("mcp");
+					if (rawMcp) {
+						const m = (rawMcp as string).match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
+						if (m) cachedMcpRgb = `\x1b[38;2;${m[1]};${m[2]};${m[3]}m`;
+					}
+					lastRawStatuses = currentRaw;
+				}
+				const extItems = cachedExtItems!;
+				const mcpRgb = cachedMcpRgb;
+
+				const lines: string[] = [
+					truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")),
+					line2,
+				];
+				if (extItems.length > 0) {
+					function formatMcpItem(t: string): string {
+						return t
 							.replace("servers ", "")
 							.replace(
 								/MCP:/,
 								`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
 							);
-						const test = current ? `${current} ${seg}` : seg;
-						if (visibleWidth(test) > width) {
-							if (current) lines.push(current);
-							current = seg;
-						} else {
-							current = test;
+					}
+					if (wrapEnabled) {
+						let current = "";
+						for (const [, text] of extItems) {
+							const seg = formatMcpItem(text);
+							const test = current ? `${current} ${seg}` : seg;
+							if (visibleWidth(test) > width) {
+								if (current) lines.push(current);
+								current = seg;
+							} else {
+								current = test;
+							}
 						}
+						// ponytail: last-resort truncation only if a single entry exceeds terminal width
+						if (current && visibleWidth(current) > width) {
+							lines.push(
+								truncateToWidth(current, width, theme.fg("dim", "...")),
+							);
+						} else if (current) {
+							lines.push(current);
+						}
+					} else {
+						const statusLine = extItems
+							.map(([, t]) => formatMcpItem(t))
+							.join(" ");
+						lines.push(
+							truncateToWidth(statusLine, width, theme.fg("dim", "...")),
+						);
 					}
-					// ponytail: last-resort truncation only if a single entry exceeds terminal width
-					if (current && visibleWidth(current) > width) {
-						lines.push(truncateToWidth(current, width, theme.fg("dim", "...")));
-					} else if (current) {
-						lines.push(current);
-					}
-				} else {
-					const statusLine = extItems
-						.map(([, t]) =>
-							t
-								.replace("servers ", "")
-								.replace(
-									/MCP:/,
-									`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
-								),
-						)
-						.join(" ");
-					lines.push(
-						truncateToWidth(statusLine, width, theme.fg("dim", "...")),
-					);
 				}
-			}
 
-			return lines;
+				return lines;
+			} catch (e) {
+				console.error("pi-tidy-footer: render failed", e);
+				return ["pi-tidy-footer: render failed"];
+			}
 		},
 	};
 }
@@ -950,6 +875,7 @@ export default function (pi: any) {
 		requestRender: undefined,
 		refreshGit: undefined,
 		refreshBalance: undefined,
+		getThinkingLevel: undefined,
 	};
 
 	function applyFooter(ctx: any) {
@@ -973,6 +899,24 @@ export default function (pi: any) {
 		);
 	}
 
+	function getCurrentRate(): number | undefined {
+		const ccy = readCostCurrency();
+		return ccyRate(ccy, readFxCache()?.rates);
+	}
+
+	function guardEnabled(fn: (args: string, ctx: any) => Promise<void>) {
+		return async (args: string, ctx: any) => {
+			if (!enabled) {
+				ctx.ui.notify(
+					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
+					"info",
+				);
+				return;
+			}
+			return fn(args, ctx);
+		};
+	}
+
 	let enabled = readPersistedEnabled();
 
 	pi.on("session_start", async (_event: any, ctx: any) => {
@@ -982,6 +926,7 @@ export default function (pi: any) {
 		if (toolState.minDisplayTimer) clearTimeout(toolState.minDisplayTimer);
 		toolState.minDisplayTimer = undefined;
 		if (enabled) applyFooter(ctx);
+		live.getThinkingLevel = () => pi.getThinkingLevel?.() ?? "off";
 	});
 
 	pi.on("tool_execution_start", (event: any) => {
@@ -998,14 +943,15 @@ export default function (pi: any) {
 		else toolState.active.set(event.toolName, n - 1);
 		// minimum 150ms display so fast tools don't flicker
 		if (!toolState.active.has(event.toolName)) {
-			toolState.minDisplayQueue.push(event.toolName);
-			if (!toolState.minDisplayTimer) {
-				toolState.minDisplayTimer = setTimeout(() => {
-					toolState.minDisplayQueue = [];
-					toolState.minDisplayTimer = undefined;
-					live.requestRender?.();
-				}, 150);
+			if (!toolState.minDisplayQueue.includes(event.toolName)) {
+				toolState.minDisplayQueue.push(event.toolName);
 			}
+			if (toolState.minDisplayTimer) clearTimeout(toolState.minDisplayTimer);
+			toolState.minDisplayTimer = setTimeout(() => {
+				toolState.minDisplayQueue = [];
+				toolState.minDisplayTimer = undefined;
+				live.requestRender?.();
+			}, STATUS_MIN_MS);
 		} else {
 			toolState.minDisplayQueue = toolState.minDisplayQueue.filter(
 				(q) => q !== event.toolName,
@@ -1026,6 +972,10 @@ export default function (pi: any) {
 
 	pi.on("model_select", () => {
 		live.refreshBalance?.();
+	});
+
+	pi.on("thinking_level_select", () => {
+		live.requestRender?.();
 	});
 
 	pi.on("turn_end", () => {
@@ -1054,14 +1004,7 @@ export default function (pi: any) {
 	pi.registerCommand("sc", {
 		description:
 			"Currency for balance and cost: /sc <code> = set; no args = show",
-		handler: async (args: string, ctx: any) => {
-			if (!enabled) {
-				ctx.ui.notify(
-					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
-					"info",
-				);
-				return;
-			}
+		handler: guardEnabled(async (args: string, ctx: any) => {
 			const ccy = args.trim().toUpperCase();
 			if (!ccy) {
 				const current = readCostCurrency();
@@ -1086,74 +1029,89 @@ export default function (pi: any) {
 				`Currency: ${ccy} (${CURRENCIES[ccy].symbol}). You may want to adjust balance (/bt) and cost (/ct) thresholds.`,
 				"info",
 			);
-		},
+		}),
 	});
 
-	pi.registerCommand("bt", {
-		description:
-			"Balance thresholds: <warn> <alert> = set (warn > alert); no args = show",
-		handler: async (args: string, ctx: any) => {
-			if (!enabled) {
-				ctx.ui.notify(
-					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
-					"info",
-				);
-				return;
-			}
+	function thresholdCommand(opts: {
+		cmd: string;
+		label: string;
+		comparison: ">" | "<";
+		direction: "greater" | "less";
+		readFn: () => { warn: number; alert: number };
+		writeFn: (w: number, a: number) => void;
+		defaults: { warn: number; alert: number };
+	}): (args: string, ctx: any) => Promise<void> {
+		return guardEnabled(async (args: string, ctx: any) => {
 			const parts = args.trim().split(/\s+/);
 			if (!args.trim()) {
-				const t = readThresholds();
+				const t = opts.readFn();
 				const ccy = readCostCurrency();
-				const fxCache = readFxCache();
-				const rate = ccyRate(ccy, fxCache?.rates);
+				const rate = getCurrentRate();
+				if (rate === undefined) {
+					ctx.ui.notify("FX rate unavailable, try again later.", "info");
+					return;
+				}
 				ctx.ui.notify(
-					`Balance thresholds: yellow < ${(t.warn * rate).toFixed(2)}, red < ${(t.alert * rate).toFixed(2)} (${ccy})`,
+					`${opts.label}: yellow ${opts.comparison} ${(t.warn * rate).toFixed(2)}, red ${opts.comparison} ${(t.alert * rate).toFixed(2)} (${ccy})`,
 					"info",
 				);
 				return;
 			}
 			const warn = Number(parts[0]);
 			const alert = Number(parts[1]);
-			if (
+			const invalid =
 				parts.length !== 2 ||
 				!Number.isFinite(warn) ||
 				!Number.isFinite(alert) ||
-				warn <= alert
-			) {
+				(opts.direction === "greater" ? warn <= alert : warn >= alert);
+			if (invalid) {
 				const ccy = readCostCurrency();
-				const fxCache = readFxCache();
-				const rate = ccyRate(ccy, fxCache?.rates);
+				const rate = getCurrentRate();
+				if (rate === undefined) {
+					ctx.ui.notify("FX rate unavailable, try again later.", "error");
+					return;
+				}
 				ctx.ui.notify(
-					`Usage: /bt <warn> <alert> — warn must be greater than alert. Default: ${(4.14 * rate).toFixed(2)} ${(1.38 * rate).toFixed(2)} (${ccy})`,
+					`Usage: /${opts.cmd} <warn> <alert> — warn must be ${opts.direction} than alert. Default: ${(opts.defaults.warn * rate).toFixed(2)} ${(opts.defaults.alert * rate).toFixed(2)} (${ccy})`,
 					"error",
 				);
 				return;
 			}
 			const ccy = readCostCurrency();
-			const fxCache = readFxCache();
-			const rate = ccyRate(ccy, fxCache?.rates);
-			writeThresholds(warn / rate, alert / rate);
+			const rate = getCurrentRate();
+			if (rate === undefined) {
+				ctx.ui.notify("FX rate unavailable, try again later.", "info");
+				return;
+			}
+			opts.writeFn(warn / rate, alert / rate);
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(
-				`Balance thresholds: yellow < ${warn}, red < ${alert} (${ccy})`,
+				`${opts.label}: yellow ${opts.comparison} ${warn}, red ${opts.comparison} ${alert} (${ccy})`,
 				"info",
 			);
-		},
+		});
+	}
+
+	pi.registerCommand("bt", {
+		description:
+			"Balance thresholds: <warn> <alert> = set (warn > alert); no args = show",
+		handler: thresholdCommand({
+			cmd: "bt",
+			label: "Balance thresholds",
+			comparison: "<",
+			direction: "greater",
+			readFn: readThresholds,
+			writeFn: writeThresholds,
+			defaults: { warn: 4.14, alert: 1.38 },
+		}),
 	});
 
 	pi.registerCommand("bs", {
 		description:
 			"Balance symbol: no args = cycle; <symbol> = set; -d <symbol> = delete",
-		handler: async (args: string, ctx: any) => {
-			if (!enabled) {
-				ctx.ui.notify(
-					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
-					"info",
-				);
-				return;
-			}
-			if (args.startsWith("-d") && args.length > 2) {
-				let sym = args.slice(args[2] === " " ? 3 : 2);
+		handler: guardEnabled(async (args: string, ctx: any) => {
+			if (args.startsWith("-d ")) {
+				let sym = args.replace(/^-d\s+/, "");
 				if (sym.startsWith('"') && sym.endsWith('"')) {
 					sym = sym.slice(1, -1);
 				}
@@ -1219,71 +1177,26 @@ export default function (pi: any) {
 				const display = BALANCE_SYMBOL_OPTIONS[sym] ?? sym;
 				ctx.ui.notify(`Balance symbol: ${display}`, "info");
 			}
-		},
+		}),
 	});
 
 	pi.registerCommand("ct", {
 		description:
 			"Cost thresholds: <warn> <alert> = set (warn < alert); no args = show",
-		handler: async (args: string, ctx: any) => {
-			if (!enabled) {
-				ctx.ui.notify(
-					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
-					"info",
-				);
-				return;
-			}
-			const parts = args.trim().split(/\s+/);
-			if (!args.trim()) {
-				const t = readCostThresholds();
-				const ccy = readCostCurrency();
-				const fxCache = readFxCache();
-				const rate = ccyRate(ccy, fxCache?.rates);
-				ctx.ui.notify(
-					`Cost thresholds: yellow > ${(t.warn * rate).toFixed(2)}, red > ${(t.alert * rate).toFixed(2)} (${ccy})`,
-					"info",
-				);
-				return;
-			}
-			const warn = Number(parts[0]);
-			const alert = Number(parts[1]);
-			if (
-				parts.length !== 2 ||
-				!Number.isFinite(warn) ||
-				!Number.isFinite(alert) ||
-				warn >= alert
-			) {
-				const ccy = readCostCurrency();
-				const fxCache = readFxCache();
-				const rate = ccyRate(ccy, fxCache?.rates);
-				ctx.ui.notify(
-					`Usage: /ct <warn> <alert> — warn must be less than alert. Default: ${(1 * rate).toFixed(2)} ${(3 * rate).toFixed(2)} (${ccy})`,
-					"error",
-				);
-				return;
-			}
-			const ccy = readCostCurrency();
-			const fxCache = readFxCache();
-			const rate = ccyRate(ccy, fxCache?.rates);
-			writeCostThresholds(warn / rate, alert / rate);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(
-				`Cost thresholds: yellow > ${warn}, red > ${alert} (${ccy})`,
-				"info",
-			);
-		},
+		handler: thresholdCommand({
+			cmd: "ct",
+			label: "Cost thresholds",
+			comparison: ">",
+			direction: "less",
+			readFn: readCostThresholds,
+			writeFn: writeCostThresholds,
+			defaults: { warn: 1, alert: 3 },
+		}),
 	});
 
 	pi.registerCommand("es", {
 		description: "Extension sort: keys = set order; no args = show order",
-		handler: async (args: string, ctx: any) => {
-			if (!enabled) {
-				ctx.ui.notify(
-					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
-					"info",
-				);
-				return;
-			}
+		handler: guardEnabled(async (args: string, ctx: any) => {
 			const trimmed = args.trim();
 			if (!trimmed) {
 				const current = readExtensionOrder();
@@ -1291,22 +1204,16 @@ export default function (pi: any) {
 				return;
 			}
 			const keys = trimmed.split(/\s+/);
+			// ponytail: keys silently accepted, unknown keys sorted to end
 			writeExtensionOrder(keys);
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(`Order set to: ${keys.join(" ")}`, "info");
-		},
+		}),
 	});
 
 	pi.registerCommand("ew", {
 		description: "Toggle extension wrap ON/OFF",
-		handler: async (_args: string, ctx: any) => {
-			if (!enabled) {
-				ctx.ui.notify(
-					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
-					"info",
-				);
-				return;
-			}
+		handler: guardEnabled(async (_args: string, ctx: any) => {
 			const next = !readWrapEnabled();
 			writeWrapEnabled(next);
 			if (enabled) applyFooter(ctx);
@@ -1314,6 +1221,6 @@ export default function (pi: any) {
 				next ? "Extension wrap: ON" : "Extension wrap: OFF",
 				"info",
 			);
-		},
+		}),
 	});
 }

@@ -2,6 +2,39 @@
 
 [中文](#中文)
 
+## [1.0.0] - 2026-07-31
+
+### Fixed
+
+- **Silent errors now logged** — all 4 previously no-op catch blocks (mergeState, refreshFx, fetchBalance, getApiKey) now emit `console.error("pi-tidy-footer:", …)`
+- **Threshold persistence regression** — readThresholds/readCostThresholds incorrectly read a non-existent nested key after the persistence refactor, silently falling back to defaults on restart
+- **Balance fetch optimistic timestamp** — balanceLastFetch was set before fetchBalance completed; a failed fetch now retries immediately instead of being blocked for 30s
+- **Network fetch timeout** — `refreshFx()` and `fetchBalance()` use `AbortSignal.timeout(5000)`, preventing permanently hung promises on network failure
+- **parseFloat crash path** — all 5 balance provider parse functions now use `Number(v) + Number.isFinite` instead of `parseFloat(v).toFixed(2)`, preventing TypeError on non-numeric API responses
+
+### Improved
+
+- **Persistence layer unified** — `readState<T>(key, fallback)` and `mergeState(patch)` replace 18 individual read/write functions. All 9 previous write patterns collapsed into shared helpers; `existsSync` I/O removed
+- **State persistence — memory cache** — state JSON is parsed once on first access and cached in memory. All `readState` calls avoid disk I/O; `mergeState` writes disk first, then updates memory
+- **Threshold commands merged** — `/bt` and `/ct` now share a `thresholdCommand()` factory, eliminating ~60 lines of duplicated parsing/validation/notification logic
+- **Command guard extracted** — `guardEnabled(fn)` wrapper replaces 6 identical `if (!enabled)` blocks in command handlers
+- **Currency rate helper** — `getCurrentRate()` replaces `const ccy = readCostCurrency(); const rate = ccyRate(ccy, fxCache?.rates)` repeated across 8 call sites
+- **Provider parse functions unified** — `safeBalance(v)` helper replaces 4 identical `Number(v) → Number.isFinite → toFixed(2)` patterns across DeepSeek, OpenRouter, SiliconFlow and Zhipu provider definitions
+- **MCP colour logic deduplicated** — `formatMcpItem()` helper replaces two identical `.replace("servers ", "").replace(/MCP:/, …)` blocks and dead `invalidateExtCache` hook removed
+- **Extension status cache** — extension item list and MCP accent colour are now cached in a factory-scoped closure and rebuilt only when `getExtensionStatuses()` changes (detected via serialized comparison)
+- **Magic numbers extracted** — `FX_TTL_MS`, `GIT_TIMEOUT_MS`, `GIT_POLL_MS`, `BALANCE_COOLDOWN_MS`, `FETCH_TIMEOUT_MS`, `STATUS_MIN_MS`, `GIT_DEBOUNCE_MS` moved to named top-level constants
+
+### Changed
+
+- **Balance cross-currency symbol mismatch fixed** — when FX data was unavailable, the balance display showed a wrong currency symbol (e.g. $12.34 for a CNY balance). Now hides the balance segment when FX rates are missing
+- **ccyRate returns undefined for missing rates** — non-USD currencies now return `undefined` instead of silently falling back to `0` when exchange rates are missing. Consumers show `--` or skip the display
+- **`/bs -d` argument parsing** — pure `-d` (no symbol) wrongly set the literal string "-d" as the active balance symbol. Now requires `-d <symbol>` with a space separator
+- **tool queue sliding window** — `minDisplayTimer` resets on every new tool completion, using a sliding 150ms window instead of a fixed one-shot timer
+- **Git status retry limit** — `runGitStatus` now bails after 3 consecutive failures, preventing tight-loop retries on a broken repository
+- **render() try-catch** — the entire render body is wrapped in try-catch; failures log to console and display a fallback line instead of breaking the footer
+- **FX TTL check moved to refreshFx entry** — previously only checked once on footer construction, now checks every `refreshFx()` call
+- **Unsued import** — removed dangling `AssistantMessage` import leftover from an earlier refactor
+
 ## [0.8.0] - 2026-07-31
 
 ### Added
@@ -163,6 +196,39 @@
 ---
 
 ## 中文
+
+## [1.0.0] - 2026-07-31
+
+### 修复
+
+- **静默错误日志化** — 4 处原 `/* no-op */` catch（mergeState、refreshFx、fetchBalance、getApiKey）全部改为 `console.error("pi-tidy-footer:", …)`
+- **阈值持久化回归** — 持久化层重构后 readThresholds/readCostThresholds 读写了不存在的嵌套 key，重启后静默退回默认值
+- **余额 fetch 乐观时间戳** — balanceLastFetch 在 fetchBalance 完成前更新；失败的请求现在即刻重试，不再被 30s 阻塞
+- **网络 fetch 超时** — `refreshFx()` 和 `fetchBalance()` 使用 `AbortSignal.timeout(5000)`，防止网络故障时 Promise 永久挂起
+- **parseFloat 崩溃路径** — 5 个余额 provider 的 parse 函数改用 `Number(v) + Number.isFinite` 替代 `parseFloat(v).toFixed(2)`，防止 API 返回非数字字符串时抛出 TypeError
+
+### 改进
+
+- **持久化层统一** — `readState<T>(key, fallback)` 和 `mergeState(patch)` 替代 18 个独立读写函数。9 种写模式收拢为 2 个共享工具，删除 `existsSync`
+- **持久化状态内存缓存** — JSON 首次访问时解析并缓存到内存。`readState` 不再走磁盘 I/O；`mergeState` 先写磁盘成功后更新内存
+- **阈值命令合并** — `/bt` 与 `/ct` 共享 `thresholdCommand()` 工厂函数，消除约 60 行重复
+- **命令守卫提取** — `guardEnabled(fn)` 包装函数替代 6 个命令 handler 中重复的 disabled 检查
+- **汇率助手提取** — `getCurrentRate()` 替代 8 处 `const ccy = readCostCurrency(); const rate = ccyRate(ccy, fxCache?.rates)`
+- **Provider parse 统一** — `safeBalance(v)` 替代 DeepSeek、OpenRouter、SiliconFlow、智谱 4 个 provider 中相同的 `Number(v) → Number.isFinite → toFixed(2)` 模式
+- **MCP 颜色逻辑去重** — `formatMcpItem()` 替代两处相同的 `replace("servers ", "").replace(/MCP:/, …)` 代码块。删除不再使用的 `invalidateExtCache` 钩子
+- **扩展状态缓存** — extItems 和 MCP 强调色在闭包中缓存，仅在 `getExtensionStatuses()` 变化时重建（通过序列化字符串对比检测）
+- **魔法数字提取为常量** — `FX_TTL_MS`、`GIT_TIMEOUT_MS`、`GIT_POLL_MS`、`BALANCE_COOLDOWN_MS`、`FETCH_TIMEOUT_MS`、`STATUS_MIN_MS`、`GIT_DEBOUNCE_MS` 提取为文件顶部具名常量
+
+### 变更
+
+- **余额跨货币符号串修复** — FX 数据缺失时余额显示错误的货币符号（如 CNY 余额显示 $12.34）。现在 FX 缺失时直接隐藏余额段
+- **ccyRate 缺失时返回 undefined** — 非 USD 货币缺汇率时不再静默兜底为 0，返回 undefined。消费端显示 `--` 或跳过
+- **`/bs -d` 参数解析** — 纯 `-d`（无符号名）将字面量 "-d" 设为当前余额符号。现要求 `-d <符号>`，以空格分隔
+- **工具队列滑动窗口** — `minDisplayTimer` 每次新工具完成时重置，用 150ms 滑动窗口替代一次性固定计时器
+- **Git status 重试上限** — `runGitStatus` 连续失败 3 次后放弃重试，防止损坏仓库上密集空转
+- **render() 异常保护** — render 主体包裹 try-catch；异常时控制台输出并返回 `["pi-tidy-footer: render failed"]`，防止 footer 消失
+- **FX TTL 检查移至 refreshFx 入口** — 原仅在 footer 构造时检查一次，改为每次 `refreshFx()` 调用时检查
+- **未使用的 import** — 移除重构遗留的 `AssistantMessage` import
 
 ## [0.8.0] - 2026-07-31
 
