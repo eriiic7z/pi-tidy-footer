@@ -38,6 +38,7 @@ const GIT_POLL_MS = 30_000;
 const BALANCE_COOLDOWN_MS = 30_000;
 const STATUS_MIN_MS = 150;
 const FETCH_TIMEOUT_MS = 5000;
+const BALANCE_FETCH_TIMEOUT_MS = 15_000;
 
 /* ------------------------------------------------------------------ */
 /*  persistence                                                        */
@@ -251,7 +252,7 @@ async function fetchBalance(
 	if (!cfg) return undefined;
 	const resp = await fetch(cfg.url, {
 		headers: { Authorization: `Bearer ${key}` },
-		signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		signal: AbortSignal.timeout(BALANCE_FETCH_TIMEOUT_MS),
 	});
 	if (!resp.ok) return undefined;
 	const data = (await resp.json()) as any;
