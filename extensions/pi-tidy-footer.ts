@@ -3,7 +3,13 @@
  * Toggle with /tf. State persists across restarts.
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -31,6 +37,26 @@ const BALANCE_SYMBOL_OPTIONS: Record<string, string> = {
 	"◉": "◉",
 };
 
+/**
+ * Built-in default rewrite rules, applied when the user has not set a rule
+ * for the same key. Visible in /ed as `[default]`; removable per-key by
+ * setting a user rule (but the default itself is not deletable).
+ */
+const DEFAULT_TRANSFORM_RULES: Record<
+	string,
+	{ hide?: boolean; rewrite?: [string, string] }
+> = {
+	caveman: {
+		rewrite: [" (\\x1b\\[[0-9;]*m)caveman level: ", "🗿{1}caveman: "],
+	},
+	ponytail: {
+		rewrite: [
+			"(\\x1b\\[[0-9;]*m) 🐴 (\\x1b\\[[0-9;]*mponytail: )\\x1b\\[[0-9;]*m\\x1b\\[[0-9;]*m⚡ ",
+			"{1}🐴{2}",
+		],
+	},
+};
+
 const FX_TTL_MS = 86_400_000;
 const GIT_TIMEOUT_MS = 3000;
 const GIT_DEBOUNCE_MS = 250;
@@ -46,6 +72,7 @@ const BALANCE_FETCH_TIMEOUT_MS = 15_000;
 
 const STATE_DIR = join(homedir(), ".pi", "agent", "extensions");
 const STATE_FILE = join(STATE_DIR, "pi-tidy-footer-state.json");
+const MCP_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
 
 let stateCache: Record<string, any> | null = null;
 
@@ -120,6 +147,14 @@ function writeWrapEnabled(wrap: boolean): void {
 	mergeState({ wrapEnabled: wrap });
 }
 
+function readEmojiHidden(): boolean {
+	return readState("emojiHidden", false);
+}
+
+function writeEmojiHidden(hidden: boolean): void {
+	mergeState({ emojiHidden: hidden });
+}
+
 function readExtensionOrder(): string[] {
 	return readState("extensionOrder", [
 		"caveman",
@@ -131,6 +166,191 @@ function readExtensionOrder(): string[] {
 
 function writeExtensionOrder(order: string[]): void {
 	mergeState({ extensionOrder: order });
+}
+
+function readTransformRules(): Record<
+	string,
+	{ hide?: boolean; rewrite?: [string, string] }
+> {
+	return readState("transformRules", {});
+}
+
+function writeTransformRules(
+	rules: Record<string, { hide?: boolean; rewrite?: [string, string] }>,
+): void {
+	mergeState({ transformRules: rules });
+}
+
+/**
+ * Expand a user pattern so ANSI colour codes between literal characters are
+ * transparent (matched but preserved). Regex metacharacters and escape
+ * sequences are left untouched.
+ */
+function colorblindPattern(pattern: string): string {
+	const META = new Set("()[]{}^$.*+?|");
+	let out = "";
+	let inClass = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (inClass) {
+			out += ch;
+			if (ch === "]") inClass = false;
+			continue;
+		}
+		if (ch === "[") {
+			out += ch;
+			inClass = true;
+			continue;
+		}
+		if (ch === "\\") {
+			out += ch + (pattern[i + 1] ?? "");
+			i++;
+			continue;
+		}
+		if (META.has(ch)) {
+			out += ch;
+			continue;
+		}
+		out += ch + "(?:\\x1b\\[[0-9;]*m)*";
+	}
+	return out;
+}
+
+/**
+ * Apply one rewrite rule to text: regex match → replacement template
+ * ({1} {2}... = captured groups). Returns original text on no match or
+ * invalid regex. When `transparent` is true, user patterns match across
+ * ANSI colour codes (colourblind). Default rules pass transparent=false.
+ */
+function applyRewrite(
+	s: string,
+	rule: { hide?: boolean; rewrite?: [string, string] },
+	transparent = false,
+): string {
+	if (!rule?.rewrite) return s;
+	const [pattern, replacement] = rule.rewrite;
+	try {
+		const re = new RegExp(transparent ? colorblindPattern(pattern) : pattern);
+		const m = s.match(re);
+		if (m) {
+			let out = replacement;
+			for (let i = 1; i < m.length; i++) {
+				out = out.split(`{${i}}`).join(m[i] ?? "");
+			}
+			return s.replace(re, out);
+		}
+	} catch {
+		/* invalid regex — keep original */
+	}
+	return s;
+}
+
+/**
+ * Clear all pi-tidy-footer config for clean uninstall.
+ * Backs up a corrupted state file before wiping it (evidence preservation).
+ */
+function resetAllConfig(): { ok: boolean; msg: string } {
+	if (!existsSync(STATE_FILE)) {
+		return { ok: true, msg: "No config to clear." };
+	}
+	try {
+		const content = readFileSync(STATE_FILE, "utf-8");
+		try {
+			JSON.parse(content);
+		} catch {
+			// corrupted — back up the raw bytes before wiping
+			const ts = new Date().toISOString().replace(/[:.]/g, "-");
+			const bak = `${STATE_FILE}.bak.${ts}`;
+			copyFileSync(STATE_FILE, bak);
+			console.error(`pi-tidy-footer: bad state backed up to ${bak}`);
+			writeFileSync(STATE_FILE, "{}", "utf-8");
+			stateCache = {};
+			return {
+				ok: true,
+				msg: `Invalid config backed up to ${bak} and cleared.`,
+			};
+		}
+		writeFileSync(STATE_FILE, "{}", "utf-8");
+		stateCache = {};
+		return { ok: true, msg: "All config cleared." };
+	} catch (e) {
+		console.error("pi-tidy-footer: resetAllConfig failed", e);
+		return { ok: false, msg: "Failed to clear config. See logs." };
+	}
+}
+
+/**
+ * Inject `settings.mcpFooterStatus = "compact"` into mcp-adapter's config
+ * (mcp.json). Only touches the settings object; preserves everything else.
+ * Returns true when the config now has compact set (either just written or
+ * already present).
+ */
+function ensureMcpCompact(): { ok: boolean; msg: string } {
+	return mutateMcpConfig((cfg) => {
+		const settings = (cfg.settings ??= {});
+		if (settings.mcpFooterStatus === "compact") {
+			return { ok: true, msg: "mcpFooterStatus already compact." };
+		}
+		settings.mcpFooterStatus = "compact";
+		return { ok: true, msg: "mcpFooterStatus set to compact." };
+	});
+}
+
+/**
+ * Remove the injected `mcpFooterStatus` from mcp.json (restore default full).
+ * Called by /fcl for clean uninstall.
+ */
+function removeMcpCompact(): { ok: boolean; msg: string } {
+	return mutateMcpConfig((cfg) => {
+		const settings = cfg.settings;
+		if (!settings || settings.mcpFooterStatus === undefined) {
+			return { ok: true, msg: "No mcpFooterStatus to restore." };
+		}
+		delete settings.mcpFooterStatus;
+		return {
+			ok: true,
+			msg: "mcpFooterStatus removed (default full restored).",
+		};
+	});
+}
+
+/**
+ * Read mcp.json, run a mutation on it, persist when the mutation changes it.
+ */
+function mutateMcpConfig(
+	mutate: (cfg: Record<string, any>) => {
+		ok: boolean;
+		msg: string;
+		changed?: boolean;
+	},
+): { ok: boolean; msg: string } {
+	if (!existsSync(MCP_CONFIG_PATH)) {
+		return { ok: false, msg: `mcp.json not found: ${MCP_CONFIG_PATH}` };
+	}
+	try {
+		const content = readFileSync(MCP_CONFIG_PATH, "utf-8");
+		let cfg: Record<string, any>;
+		try {
+			cfg = JSON.parse(content);
+		} catch {
+			return { ok: false, msg: "mcp.json is corrupted; not touching it." };
+		}
+		if (!cfg || typeof cfg !== "object" || Array.isArray(cfg)) {
+			return { ok: false, msg: "mcp.json has invalid shape; not touching it." };
+		}
+		const result = mutate(cfg);
+		if (result.ok && result.changed !== false) {
+			writeFileSync(
+				MCP_CONFIG_PATH,
+				JSON.stringify(cfg, null, 2) + "\n",
+				"utf-8",
+			);
+		}
+		return result;
+	} catch (e) {
+		console.error("pi-tidy-footer: mutateMcpConfig failed", e);
+		return { ok: false, msg: "Failed to write mcp.json. See logs." };
+	}
 }
 
 function readCostCurrency(): string {
@@ -440,6 +660,8 @@ function makeFooter(
 	costThresholds: { warn: number; alert: number },
 	extensionOrder: string[],
 	balanceSymbol: string,
+	userRules: Record<string, { hide?: boolean; rewrite?: [string, string] }>,
+	defaultRules: Record<string, { hide?: boolean; rewrite?: [string, string] }>,
 ) {
 	let disposed = false;
 	let gitTokens = "";
@@ -458,6 +680,7 @@ function makeFooter(
 	let cachedMcpRgb = "";
 
 	const wrapEnabled = readWrapEnabled();
+	const emojiHidden = readEmojiHidden();
 
 	const costCurrency = readCostCurrency();
 	let fxCache = readFxCache();
@@ -767,6 +990,8 @@ function makeFooter(
 
 				/* extension statuses — cache with serialized comparison */
 				const raw = fd.getExtensionStatuses();
+				lastSeenExtStatuses = new Map([...raw.entries()]);
+				lastSeenExtKeys = [...lastSeenExtStatuses.keys()];
 				const currentRaw = JSON.stringify([...raw.entries()]);
 				if (currentRaw !== lastRawStatuses) {
 					cachedExtItems = [];
@@ -775,23 +1000,23 @@ function makeFooter(
 						const order = new Map<string, number>();
 						extensionOrder.forEach((key, i) => order.set(key, i));
 						const sorted = (Array.from(raw.entries()) as [string, string][])
-							.filter(([, v]) => v.trim())
+							.filter(([k, v]) => {
+								if (!v.trim()) return false;
+								return !userRules[k]?.hide;
+							})
 							.sort(([a], [b]) => {
 								const oa = order.get(a) ?? 99;
 								const ob = order.get(b) ?? 99;
 								return oa !== ob ? oa - ob : a.localeCompare(b);
 							})
 							.map(([k, v]) => {
-								let s = v.trim();
-								if (k === "caveman") {
-									s = s
-										.replace("caveman level:", "Caveman:")
-										.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
-								} else if (k === "ponytail") {
-									s = s
-										.replace("⚡ ", "")
-										.replace(/(FULL|ULTRA|LITE|OFF)/g, (w) => w.toLowerCase());
-								}
+								// chain: default rule (explicit colour codes) first,
+								// user rule (colourblind pattern) second
+								const s = applyRewrite(
+									applyRewrite(v.trim(), defaultRules[k], false),
+									userRules[k],
+									true,
+								);
 								return [
 									k,
 									s.replace(/(\p{Extended_Pictographic})\s+/gu, "$1"),
@@ -810,18 +1035,43 @@ function makeFooter(
 				const extItems = cachedExtItems!;
 				const mcpRgb = cachedMcpRgb;
 
+				// mcp-adapter full status text is verbose — inject compact once
+				// (adapter reads config at startup; restart applies it)
+				if (!readState("mcpCompactInjected", false)) {
+					const rawMcp = raw.get("mcp");
+					if (
+						rawMcp !== undefined &&
+						/servers? enabled/.test(rawMcp as string)
+					) {
+						const result = ensureMcpCompact();
+						mergeState({ mcpCompactInjected: true });
+						if (result.ok) {
+							console.log(
+								"pi-tidy-footer: " +
+									result.msg +
+									" Restart pi to apply compact MCP status.",
+							);
+						} else {
+							console.error("pi-tidy-footer: " + result.msg);
+						}
+					}
+				}
+
 				const lines: string[] = [
 					truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "...")),
 					line2,
 				];
 				if (extItems.length > 0) {
 					function formatMcpItem(t: string): string {
-						return t
-							.replace("servers ", "")
-							.replace(
-								/MCP:/,
-								`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
-							);
+						return (
+							t
+								// compact mode emits "MCP 2/1" without icon or colon — normalize before colouring
+								.replace(/MCP(?=\s)/, "🔌MCP:")
+								.replace(
+									/MCP:/,
+									`\x1b[38;2;128;128;128mMCP:${mcpRgb || "\x1b[38;2;138;190;183m"}`,
+								)
+						);
 					}
 					if (wrapEnabled) {
 						let current = "";
@@ -853,7 +1103,12 @@ function makeFooter(
 					}
 				}
 
-				return lines;
+				// one-key emoji hiding: strip pictographs after all decoration is applied
+				return emojiHidden
+					? lines.map((l) =>
+							l.replace(/\p{Extended_Pictographic}/gu, "").replace(/ +/g, " "),
+						)
+					: lines;
 			} catch (e) {
 				console.error("pi-tidy-footer: render failed", e);
 				return ["pi-tidy-footer: render failed"];
@@ -865,6 +1120,11 @@ function makeFooter(
 /* ------------------------------------------------------------------ */
 /*  extension entry-point                                              */
 /* ------------------------------------------------------------------ */
+
+// Runtime extension statuses seen by the last render, for /ed listing
+// (event-driven update; not a poll)
+let lastSeenExtKeys: string[] = [];
+let lastSeenExtStatuses: Map<string, string> = new Map();
 
 export default function (pi: any) {
 	const toolState: ToolActivityState = {
@@ -884,6 +1144,7 @@ export default function (pi: any) {
 		const costThresholds = readCostThresholds();
 		const extensionOrder = readExtensionOrder();
 		const balanceSymbol = readBalanceSymbol();
+		const userRules = readTransformRules();
 		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
 			makeFooter(
 				ctx,
@@ -896,6 +1157,8 @@ export default function (pi: any) {
 				costThresholds,
 				extensionOrder,
 				balanceSymbol,
+				userRules,
+				DEFAULT_TRANSFORM_RULES,
 			),
 		);
 	}
@@ -916,6 +1179,80 @@ export default function (pi: any) {
 			}
 			return fn(args, ctx);
 		};
+	}
+
+	/**
+	 * Shared handler for bulk key commands (edh/eds/edc): parse keys, apply a
+	 * per-key mutation, persist, refresh footer.
+	 */
+	function bulkKeysCommand(opts: {
+		cmd: string;
+		action: string;
+		skipLabel: string;
+		invalidLabel?: string;
+		apply: (
+			rules: Record<string, any>,
+			key: string,
+		) => boolean | "skip" | "invalid" | void;
+		applyAll?: (rules: Record<string, any>) => number | void;
+	}) {
+		return guardEnabled(async (args: string, ctx: any) => {
+			const parts = args.match(/("[^"]*"|\S+)/g) ?? [];
+			const unquote = (s: string) =>
+				s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"'
+					? s.slice(1, -1)
+					: s;
+			const keys = parts.map(unquote).filter(Boolean);
+			if (keys.length === 0) {
+				ctx.ui.notify(
+					`Usage: /${opts.cmd} <key> [key...] — quote keys containing spaces`,
+					"error",
+				);
+				return;
+			}
+			const rules = readTransformRules();
+			const done: string[] = [];
+			const skipped: string[] = [];
+			const invalid: string[] = [];
+			// "all" clears every user rule (falls back to defaults)
+			if (keys.length === 1 && keys[0] === "all") {
+				if (opts.applyAll) {
+					const count = opts.applyAll(rules) ?? 0;
+					writeTransformRules(rules);
+					if (enabled) applyFooter(ctx);
+					ctx.ui.notify(
+						count > 0
+							? `${opts.action} all: ${count} rule${count > 1 ? "s" : ""}`
+							: "Nothing to clear.",
+						"info",
+					);
+				} else {
+					ctx.ui.notify(`/${opts.cmd} does not support "all"`, "error");
+				}
+				return;
+			}
+			for (const key of keys) {
+				const r = opts.apply(rules, key);
+				if (r === false || r === "skip") skipped.push(key);
+				else if (r === "invalid") invalid.push(key);
+				else done.push(key);
+			}
+			writeTransformRules(rules);
+			if (enabled) applyFooter(ctx);
+			const doneMsg =
+				done.length > 0 ? `${opts.action}: ${done.join(", ")}` : "";
+			const skipMsg =
+				skipped.length > 0 ? `${opts.skipLabel}: ${skipped.join(", ")}` : "";
+			const invalidMsg =
+				invalid.length > 0 && opts.invalidLabel
+					? `${opts.invalidLabel}: ${invalid.join(", ")}`
+					: "";
+			ctx.ui.notify(
+				[doneMsg, skipMsg, invalidMsg].filter(Boolean).join(" | ") ||
+					"Nothing done.",
+				"info",
+			);
+		});
 	}
 
 	let enabled = readPersistedEnabled();
@@ -1223,5 +1560,241 @@ export default function (pi: any) {
 				"info",
 			);
 		}),
+	});
+
+	pi.registerCommand("ede", {
+		description: "Toggle extension emoji hiding ON/OFF",
+		handler: guardEnabled(async (_args: string, ctx: any) => {
+			const next = !readEmojiHidden();
+			writeEmojiHidden(next);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				next
+					? "Extension emoji: HIDDEN"
+					: "Extension emoji: SHOWN. For a single extension, use /edr <key> <pattern> <replacement>",
+				"info",
+			);
+		}),
+	});
+
+	pi.registerCommand("ed", {
+		description:
+			"Extension display rules: list all extension status keys with their rules; quote keys containing spaces",
+		handler: guardEnabled(async (_args: string, ctx: any) => {
+			const userRules = readTransformRules();
+			const allKeys = [
+				...new Set([
+					...lastSeenExtKeys,
+					...Object.keys(userRules),
+					...Object.keys(DEFAULT_TRANSFORM_RULES),
+				]),
+			];
+			if (allKeys.length === 0) {
+				ctx.ui.notify("No extension display changed yet", "info");
+				return;
+			}
+			const hasRule = (k: string) => userRules[k] || DEFAULT_TRANSFORM_RULES[k];
+			// rules first, rest after; stable within each group
+			const orderedKeys = [
+				...allKeys.filter((k) => hasRule(k)),
+				...allKeys.filter((k) => !hasRule(k)),
+			];
+			const lines = orderedKeys.map((k) => {
+				const rawText = lastSeenExtStatuses.get(k)?.trim();
+				const clean = rawText?.replace(/\x1b\[[0-9;]*m/g, "");
+				const parts: string[] = [];
+				if (userRules[k]?.hide) {
+					parts.push("hidden");
+				} else if (clean && (userRules[k] || DEFAULT_TRANSFORM_RULES[k])) {
+					// chain: default then user, mirroring the render path
+					const after = applyRewrite(
+						applyRewrite(clean, DEFAULT_TRANSFORM_RULES[k]),
+						userRules[k],
+					);
+					parts.push(after === clean ? "no match" : `${clean} → ${after}`);
+				} else {
+					parts.push("(no rule)");
+				}
+				return `"${k}": ${parts.join(", ")}`;
+			});
+			ctx.ui.notify(`Extension Display:\n${lines.join("\n")}`, "info");
+		}),
+	});
+
+	pi.registerCommand("edh", {
+		description:
+			"Hide extension statuses: /edh <key> [key...]; quote keys containing spaces",
+		handler: bulkKeysCommand({
+			cmd: "edh",
+			action: "Hidden",
+			skipLabel: "Already hidden",
+			invalidLabel: "Unknown extension",
+			apply: (rules, key) => {
+				if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
+					return "invalid";
+				}
+				if (rules[key]?.hide) return "skip";
+				rules[key] = { ...rules[key], hide: true };
+			},
+		}),
+	});
+
+	pi.registerCommand("eds", {
+		description:
+			"Show extension statuses again: /eds <key> [key...]; quote keys containing spaces",
+		handler: bulkKeysCommand({
+			cmd: "eds",
+			action: "Shown",
+			skipLabel: "Already showing",
+			invalidLabel: "Unknown extension",
+			apply: (rules, key) => {
+				if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
+					return "invalid";
+				}
+				if (!rules[key]?.hide) return "skip";
+				const { hide: _h, ...rest } = rules[key];
+				if (Object.keys(rest).length === 0) delete rules[key];
+				else rules[key] = rest;
+			},
+		}),
+	});
+
+	pi.registerCommand("edr", {
+		description:
+			"Rewrite an extension status: /edr <key> <pattern> <replacement>; {1} {2}... = captured groups; quote args containing spaces",
+		handler: guardEnabled(async (args: string, ctx: any) => {
+			const parts = args.match(/("[^"]*"|\S+)/g) ?? [];
+			const unquote = (s: string) =>
+				s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"'
+					? s.slice(1, -1)
+					: s;
+			const key = unquote(parts[0] ?? "");
+			const pattern = unquote(parts[1] ?? "");
+			const replacement = unquote(parts[2] ?? "");
+			if (!key || !pattern || replacement === undefined) {
+				ctx.ui.notify(
+					"Usage: /edr <key> <pattern> <replacement> — use {1} {2}... for captured groups; quote args containing spaces",
+					"error",
+				);
+				return;
+			}
+			try {
+				new RegExp(pattern);
+			} catch {
+				ctx.ui.notify(`Invalid pattern: "${pattern}"`, "error");
+				return;
+			}
+
+			// key must be a known extension (when the runtime list is populated)
+			if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
+				ctx.ui.notify(
+					`Unknown extension: "${key}" — run /ed to list available extensions`,
+					"error",
+				);
+				return;
+			}
+
+			// replacement uses {n} but pattern has no real capture group
+			// (excludes escaped \( and non-capturing (?:)
+			if (/\{\d+\}/.test(replacement) && !/(?<!\\)\((?!\?)/.test(pattern)) {
+				ctx.ui.notify(
+					`Error. {n} needs (...) in the pattern. Try: /edr ${key} "(${pattern})" "${replacement}"`,
+					"error",
+				);
+				return;
+			}
+
+			// baseline check: warn when the pattern targets the current display
+			// (which includes a previous user rule) instead of the default output
+			const rawText = lastSeenExtStatuses.get(key)?.trim();
+			if (rawText) {
+				const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+				const defaultOut = clean(
+					applyRewrite(rawText, DEFAULT_TRANSFORM_RULES[key], false),
+				);
+				const userRule = readTransformRules()[key];
+				const currentOut = clean(
+					applyRewrite(
+						applyRewrite(rawText, DEFAULT_TRANSFORM_RULES[key], false),
+						userRule,
+						true,
+					),
+				);
+				const re = new RegExp(colorblindPattern(pattern));
+				if (!re.test(defaultOut) && re.test(currentOut)) {
+					// user pattern only matches the current display (previous rule's
+					// result), not the default output
+					if (defaultOut.includes(replacement) && replacement.length >= 3) {
+						// replacement equals a specific fragment of the default output →
+						// user wants to restore the original → /edc
+						ctx.ui.notify(
+							`Error. To restore the original, use /edc "${key}"`,
+							"error",
+						);
+					} else {
+						ctx.ui.notify(
+							`Error. Pick the fragment to rewrite from: "${defaultOut}"`,
+							"error",
+						);
+					}
+					return;
+				}
+				if (!re.test(defaultOut) && !re.test(currentOut)) {
+					ctx.ui.notify(
+						`Error. "${pattern}" not found in: "${defaultOut}"`,
+						"error",
+					);
+				}
+			}
+
+			const rules = readTransformRules();
+			rules[key] = { ...rules[key], rewrite: [pattern, replacement] };
+			writeTransformRules(rules);
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				`Rewrite set for ${key}: ${replacement || "<empty>"}`,
+				"info",
+			);
+		}),
+	});
+
+	pi.registerCommand("edc", {
+		description:
+			"Clear transform rules: /edc <key> [key...] or /edc all; quote keys containing spaces",
+		handler: bulkKeysCommand({
+			cmd: "edc",
+			action: "Cleared",
+			skipLabel: "No rules for",
+			invalidLabel: "Unknown extension",
+			apply: (rules, key) => {
+				if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
+					return "invalid";
+				}
+				if (!rules[key]) return "skip";
+				delete rules[key];
+			},
+			applyAll: (rules) => {
+				const count = Object.keys(rules).length;
+				for (const key of Object.keys(rules)) delete rules[key];
+				return count;
+			},
+		}),
+	});
+
+	pi.registerCommand("fcl", {
+		description: "Clear all pi-tidy-footer config for clean uninstall",
+		handler: async (_args: string, ctx: any) => {
+			const result = resetAllConfig();
+			const mcpResult = removeMcpCompact();
+			if (!result.ok) {
+				ctx.ui.notify(`pi-tidy-footer: ${result.msg}`, "error");
+				return;
+			}
+			if (enabled) applyFooter(ctx);
+			ctx.ui.notify(
+				`pi-tidy-footer: ${result.msg} ${mcpResult.msg} You can now uninstall the package.`,
+				mcpResult.ok ? "info" : "error",
+			);
+		},
 	});
 }
