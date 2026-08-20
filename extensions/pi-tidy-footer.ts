@@ -8,10 +8,13 @@ import {
 	existsSync,
 	mkdirSync,
 	readFileSync,
+	realpathSync,
+	rmSync,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -39,23 +42,12 @@ const BALANCE_SYMBOL_OPTIONS: Record<string, string> = {
 
 /**
  * Built-in default rewrite rules, applied when the user has not set a rule
- * for the same key. Visible in /ed as `[default]`; removable per-key by
- * setting a user rule (but the default itself is not deletable).
+ * for the same key. Visible in /ed; removable per-key by setting a user
+ * rule (but the builtin itself is not deletable).
+ *
+ * NOTE: builtin transformations now ship in extensions/ed/ed.ts and are loaded
+ * via readTidyBuiltin(); user ones live in the user dir as eduser.ts.
  */
-const DEFAULT_TRANSFORM_RULES: Record<
-	string,
-	{ hide?: boolean; rewrite?: [string, string] }
-> = {
-	caveman: {
-		rewrite: [" (\\x1b\\[[0-9;]*m)caveman level: ", "🗿{1}caveman: "],
-	},
-	ponytail: {
-		rewrite: [
-			"(\\x1b\\[[0-9;]*m) 🐴 (\\x1b\\[[0-9;]*mponytail: )\\x1b\\[[0-9;]*m\\x1b\\[[0-9;]*m⚡ ",
-			"{1}🐴{2}",
-		],
-	},
-};
 
 const FX_TTL_MS = 86_400_000;
 const GIT_TIMEOUT_MS = 3000;
@@ -73,6 +65,134 @@ const BALANCE_FETCH_TIMEOUT_MS = 15_000;
 const STATE_DIR = join(homedir(), ".pi", "agent", "extensions");
 const STATE_FILE = join(STATE_DIR, "pi-tidy-footer-state.json");
 const MCP_CONFIG_PATH = join(homedir(), ".config", "mcp", "mcp.json");
+// default user transformers dir (user-editable, never overwritten by updates)
+const DEFAULT_TRANSFORMERS_DIR = join(
+	homedir(),
+	".pi",
+	"agent",
+	"extensions",
+	"pi-tidy-footer",
+	"ed",
+);
+
+/** Configured user transformers dir (override via /edt dir). */
+function readTransformersDir(): string {
+	const d = readState<string>("transformersDir", "");
+	return d && d.trim() ? resolve(d) : DEFAULT_TRANSFORMERS_DIR;
+}
+
+function writeTransformersDir(dir: string): void {
+	mergeState({ transformersDir: dir });
+}
+
+// package dir: resolve the real path of this extension file (symlink → real
+// project path) and use its directory. import.meta.url points at the symlink
+// location when pi loads it, so we must resolve the symlink.
+const PACKAGE_DIR = dirname(realpathSync(fileURLToPath(import.meta.url)));
+
+/* ------------------------------------------------------------------ */
+/*  transformers — builtin (ships with package) + user (user dir)      */
+/* ------------------------------------------------------------------ */
+
+interface TransformContext {
+	raw: string;
+	plain: string;
+	theme: any;
+}
+
+interface StatusTransformer {
+	keys: string[];
+	transform(
+		key: string,
+		value: string,
+		ctx: TransformContext,
+	): string | null | undefined;
+}
+
+/**
+ * Ensure the user transformers dir and eduser.ts exist. eduser.ts is copied
+ * from the shipped template on first run; it is never overwritten afterwards
+ * so user edits survive extension updates.
+ */
+async function ensureUserTfFile(): Promise<void> {
+	try {
+		const userFile = join(readTransformersDir(), "eduser.ts");
+		if (existsSync(userFile)) return;
+		mkdirSync(readTransformersDir(), { recursive: true });
+		const templatePath = join(PACKAGE_DIR, "ed", "eduser.ts");
+		if (existsSync(templatePath)) {
+			copyFileSync(templatePath, userFile);
+		} else {
+			// fallback: inline minimal template
+			writeFileSync(userFile, "export const user = {};\n", "utf-8");
+		}
+	} catch (e) {
+		console.error("pi-tidy-footer: ensureUserTfFile failed", e);
+	}
+}
+
+/**
+ * Normalize a transformer export into a StatusTransformer record.
+ * Accepts either the object form ({ keys, transform }) or a bare function
+ * form (function(key, value, ctx) — applies to all keys via "*").
+ */
+function coerceTransformerMap(
+	exportObj: unknown,
+): Record<string, StatusTransformer> {
+	if (typeof exportObj === "function") {
+		const fn = exportObj as StatusTransformer["transform"];
+		return {
+			"*": {
+				keys: ["*"],
+				transform: fn,
+			},
+		};
+	}
+	if (exportObj && typeof exportObj === "object" && !Array.isArray(exportObj)) {
+		return exportObj as Record<string, StatusTransformer>;
+	}
+	return {};
+}
+
+/**
+ * Read the builtin transformers from the shipped package file
+ * (extensions/ed/ed.ts). Always active; updates with releases.
+ */
+async function readTidyBuiltin(): Promise<Record<string, StatusTransformer>> {
+	try {
+		const url =
+			"file://" +
+			join(PACKAGE_DIR, "ed", "ed.ts")
+				.split(sep)
+				.map(encodeURIComponent)
+				.join("/") +
+			`?t=${Date.now()}`;
+		const mod = await import(url);
+		return coerceTransformerMap((mod as any)?.builtin);
+	} catch (e) {
+		console.error("pi-tidy-footer: readTidyBuiltin failed", e);
+	}
+	return {};
+}
+
+/**
+ * Read the user transformers from the user dir (eduser.ts). Active only when
+ * transformer mode is on. User transformers override builtins by key.
+ */
+async function readTidyUser(): Promise<Record<string, StatusTransformer>> {
+	try {
+		const userFile = join(readTransformersDir(), "eduser.ts");
+		const url =
+			"file://" +
+			userFile.split(sep).map(encodeURIComponent).join("/") +
+			`?t=${Date.now()}`;
+		const mod = await import(url);
+		return coerceTransformerMap((mod as any)?.user);
+	} catch (e) {
+		console.error("pi-tidy-footer: readTidyUser failed", e);
+	}
+	return {};
+}
 
 let stateCache: Record<string, any> | null = null;
 
@@ -102,6 +222,51 @@ function mergeState(patch: Record<string, any>): void {
 		console.error("pi-tidy-footer: mergeState failed", e);
 	}
 }
+
+/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/*  transformers — builtin (package) + user (user dir)                */
+/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+
+/** Transformer mode: off (default) = /ed commands control display; on = user transformers take over. */
+function readTransformerMode(): boolean {
+	return readState("transformerMode", false);
+}
+
+function writeTransformerMode(on: boolean): void {
+	mergeState({ transformerMode: on });
+}
+
+/** Disabled transformer keys (via /edt d), persisted. */
+function readDisabledTransformerKeys(): string[] {
+	return readState<string[]>("disabledTransformerKeys", []);
+}
+
+function writeDisabledTransformerKeys(keys: string[]): void {
+	mergeState({ disabledTransformerKeys: keys });
+}
+
+/**
+ * Strip ANSI escape codes (used to build the `plain` field for transformers).
+ */
+function stripAnsi(s: string): string {
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+// Builtin transformers read from the package (extensions/ed/ed.ts),
+// always active. Populated at session_start; updated with releases.
+let tidyBuiltin: Record<string, StatusTransformer> = {};
+
+// User transformers read from the user dir (eduser.ts), active only when
+// transformerMode is on. User transformers override builtins by key.
+let tidyUser: Record<string, StatusTransformer> = {};
+
+// Disabled transformer keys (via /edt d). Populated at session_start.
+let disabledTransformerKeys: Set<string> = new Set();
+
+/* ------------------------------------------------------------------ */
 
 function readPersistedEnabled(): boolean {
 	return readState("enabled", true);
@@ -661,7 +826,6 @@ function makeFooter(
 	extensionOrder: string[],
 	balanceSymbol: string,
 	userRules: Record<string, { hide?: boolean; rewrite?: [string, string] }>,
-	defaultRules: Record<string, { hide?: boolean; rewrite?: [string, string] }>,
 ) {
 	let disposed = false;
 	let gitTokens = "";
@@ -999,28 +1163,58 @@ function makeFooter(
 					if (raw.size > 0) {
 						const order = new Map<string, number>();
 						extensionOrder.forEach((key, i) => order.set(key, i));
+						const tm = readTransformerMode();
 						const sorted = (Array.from(raw.entries()) as [string, string][])
 							.filter(([k, v]) => {
 								if (!v.trim()) return false;
-								return !userRules[k]?.hide;
+								// hide only applies in /ed mode; transformer mode freezes /ed rules
+								return tm || !userRules[k]?.hide;
 							})
 							.sort(([a], [b]) => {
 								const oa = order.get(a) ?? 99;
 								const ob = order.get(b) ?? 99;
 								return oa !== ob ? oa - ob : a.localeCompare(b);
 							})
-							.map(([k, v]) => {
-								// chain: default rule (explicit colour codes) first,
-								// user rule (colourblind pattern) second
-								const s = applyRewrite(
-									applyRewrite(v.trim(), defaultRules[k], false),
-									userRules[k],
-									true,
-								);
+							.flatMap(([k, v]) => {
+								// transformers: builtin (always) then user (mode on).
+								// In /ed mode (off), user transformers are skipped and the
+								// /ed state rules apply instead. Disabled keys (via /edt d)
+								// skip all transformers and show the raw text.
+								const applyTf = (tf: StatusTransformer | undefined) => {
+									if (!tf || disabledTransformerKeys.has(k)) return v.trim();
+									try {
+										const r = tf.transform(k, v, {
+											raw: v,
+											plain: stripAnsi(v),
+											theme,
+										});
+										if (r === null || r === undefined) return "";
+										return r;
+									} catch (e) {
+										console.error(
+											`pi-tidy-footer: transformer for key "${k}" threw:`,
+											e,
+										);
+										return v.trim();
+									}
+								};
+								let s: string;
+								if (tm) {
+									// transformer mode: user transformer for this key wins
+									// (last-write-wins), otherwise the builtin applies
+									s = applyTf(tidyUser[k] ?? tidyBuiltin[k]);
+								} else {
+									// /ed mode: builtin, then /ed state rules on top
+									s = applyTf(tidyBuiltin[k]);
+									s = applyRewrite(s, userRules[k], true);
+								}
+								if (!s) return [];
 								return [
-									k,
-									s.replace(/(\p{Extended_Pictographic})\s+/gu, "$1"),
-								] as [string, string];
+									[k, s.replace(/(\p{Extended_Pictographic})\s+/gu, "$1")] as [
+										string,
+										string,
+									],
+								];
 							});
 						cachedExtItems.push(...sorted);
 					}
@@ -1158,7 +1352,6 @@ export default function (pi: any) {
 				extensionOrder,
 				balanceSymbol,
 				userRules,
-				DEFAULT_TRANSFORM_RULES,
 			),
 		);
 	}
@@ -1182,6 +1375,23 @@ export default function (pi: any) {
 	}
 
 	/**
+	 * Like guardEnabled, but also freezes the /ed rule commands when
+	 * transformer mode is on (user transformers take over).
+	 */
+	function guardRuleCommands(fn: (args: string, ctx: any) => Promise<void>) {
+		return guardEnabled(async (args: string, ctx: any) => {
+			if (readTransformerMode()) {
+				ctx.ui.notify(
+					"Command unavailable: transformer mode is on — user transformers manage extension display. Use /edt off to return to /ed commands.",
+					"info",
+				);
+				return;
+			}
+			return fn(args, ctx);
+		});
+	}
+
+	/**
 	 * Shared handler for bulk key commands (edh/eds/edc): parse keys, apply a
 	 * per-key mutation, persist, refresh footer.
 	 */
@@ -1195,8 +1405,9 @@ export default function (pi: any) {
 			key: string,
 		) => boolean | "skip" | "invalid" | void;
 		applyAll?: (rules: Record<string, any>) => number | void;
+		freezeWhenTransformers?: boolean;
 	}) {
-		return guardEnabled(async (args: string, ctx: any) => {
+		const guarded = async (args: string, ctx: any) => {
 			const parts = args.match(/("[^"]*"|\S+)/g) ?? [];
 			const unquote = (s: string) =>
 				s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"'
@@ -1252,7 +1463,10 @@ export default function (pi: any) {
 					"Nothing done.",
 				"info",
 			);
-		});
+		};
+		return opts.freezeWhenTransformers
+			? guardRuleCommands(guarded)
+			: guardEnabled(guarded);
 	}
 
 	let enabled = readPersistedEnabled();
@@ -1263,6 +1477,14 @@ export default function (pi: any) {
 		toolState.minDisplayQueue.length = 0;
 		if (toolState.minDisplayTimer) clearTimeout(toolState.minDisplayTimer);
 		toolState.minDisplayTimer = undefined;
+		// ensure the user transformers dir + eduser.ts exist
+		await ensureUserTfFile();
+		// load builtin transformers from the package (always active)
+		tidyBuiltin = await readTidyBuiltin();
+		// load user transformers (active only in transformer mode)
+		tidyUser = await readTidyUser();
+		// load disabled transformer keys
+		disabledTransformerKeys = new Set(readDisabledTransformerKeys());
 		if (enabled) applyFooter(ctx);
 		live.getThinkingLevel = () => pi.getThinkingLevel?.() ?? "off";
 	});
@@ -1564,7 +1786,7 @@ export default function (pi: any) {
 
 	pi.registerCommand("ede", {
 		description: "Toggle extension emoji hiding ON/OFF",
-		handler: guardEnabled(async (_args: string, ctx: any) => {
+		handler: guardRuleCommands(async (_args: string, ctx: any) => {
 			const next = !readEmojiHidden();
 			writeEmojiHidden(next);
 			if (enabled) applyFooter(ctx);
@@ -1581,19 +1803,41 @@ export default function (pi: any) {
 		description:
 			"Extension display rules: list all extension status keys with their rules; quote keys containing spaces",
 		handler: guardEnabled(async (_args: string, ctx: any) => {
+			// transformer mode on: user transformers take over display
+			if (readTransformerMode()) {
+				const allKeys = [
+					...new Set([
+						...lastSeenExtKeys,
+						...Object.keys(tidyBuiltin),
+						...Object.keys(tidyUser),
+					]),
+				];
+				const lines = allKeys.map((k) => {
+					const parts: string[] = [];
+					if (tidyUser[k]) parts.push("user transformer");
+					if (tidyBuiltin[k]) parts.push("builtin transformer");
+					if (parts.length === 0) parts.push("(no rule)");
+					return `"${k}": ${parts.join(", ")}`;
+				});
+				ctx.ui.notify(
+					`Transformer mode (user transformers):\n${lines.join("\n")}`,
+					"info",
+				);
+				return;
+			}
 			const userRules = readTransformRules();
 			const allKeys = [
 				...new Set([
 					...lastSeenExtKeys,
 					...Object.keys(userRules),
-					...Object.keys(DEFAULT_TRANSFORM_RULES),
+					...Object.keys(tidyBuiltin),
 				]),
 			];
 			if (allKeys.length === 0) {
 				ctx.ui.notify("No extension display changed yet", "info");
 				return;
 			}
-			const hasRule = (k: string) => userRules[k] || DEFAULT_TRANSFORM_RULES[k];
+			const hasRule = (k: string) => userRules[k] || tidyBuiltin[k];
 			// rules first, rest after; stable within each group
 			const orderedKeys = [
 				...allKeys.filter((k) => hasRule(k)),
@@ -1605,13 +1849,13 @@ export default function (pi: any) {
 				const parts: string[] = [];
 				if (userRules[k]?.hide) {
 					parts.push("hidden");
-				} else if (clean && (userRules[k] || DEFAULT_TRANSFORM_RULES[k])) {
-					// chain: default then user, mirroring the render path
-					const after = applyRewrite(
-						applyRewrite(clean, DEFAULT_TRANSFORM_RULES[k]),
-						userRules[k],
-					);
+				} else if (clean && userRules[k]) {
+					// /ed state rule preview (builtin transformers are functions —
+					// their effect is not previewable here)
+					const after = applyRewrite(clean, userRules[k]);
 					parts.push(after === clean ? "no match" : `${clean} → ${after}`);
+				} else if (tidyBuiltin[k]) {
+					parts.push("builtin transformer");
 				} else {
 					parts.push("(no rule)");
 				}
@@ -1629,6 +1873,7 @@ export default function (pi: any) {
 			action: "Hidden",
 			skipLabel: "Already hidden",
 			invalidLabel: "Unknown extension",
+			freezeWhenTransformers: true,
 			apply: (rules, key) => {
 				if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
 					return "invalid";
@@ -1647,6 +1892,7 @@ export default function (pi: any) {
 			action: "Shown",
 			skipLabel: "Already showing",
 			invalidLabel: "Unknown extension",
+			freezeWhenTransformers: true,
 			apply: (rules, key) => {
 				if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
 					return "invalid";
@@ -1662,7 +1908,7 @@ export default function (pi: any) {
 	pi.registerCommand("edr", {
 		description:
 			"Rewrite an extension status: /edr <key> <pattern> <replacement>; {1} {2}... = captured groups; quote args containing spaces",
-		handler: guardEnabled(async (args: string, ctx: any) => {
+		handler: guardRuleCommands(async (args: string, ctx: any) => {
 			const parts = args.match(/("[^"]*"|\S+)/g) ?? [];
 			const unquote = (s: string) =>
 				s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"'
@@ -1709,17 +1955,24 @@ export default function (pi: any) {
 			const rawText = lastSeenExtStatuses.get(key)?.trim();
 			if (rawText) {
 				const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-				const defaultOut = clean(
-					applyRewrite(rawText, DEFAULT_TRANSFORM_RULES[key], false),
-				);
+				// default output = builtin transformer applied (if any)
+				let defaultText = rawText;
+				const builtinTf = tidyBuiltin[key];
+				if (builtinTf) {
+					try {
+						const r = builtinTf.transform(key, rawText, {
+							raw: rawText,
+							plain: clean(rawText),
+							theme: undefined as any,
+						});
+						if (typeof r === "string") defaultText = r;
+					} catch {
+						/* keep raw */
+					}
+				}
+				const defaultOut = clean(defaultText);
 				const userRule = readTransformRules()[key];
-				const currentOut = clean(
-					applyRewrite(
-						applyRewrite(rawText, DEFAULT_TRANSFORM_RULES[key], false),
-						userRule,
-						true,
-					),
-				);
+				const currentOut = clean(applyRewrite(defaultText, userRule, true));
 				const re = new RegExp(colorblindPattern(pattern));
 				if (!re.test(defaultOut) && re.test(currentOut)) {
 					// user pattern only matches the current display (previous rule's
@@ -1766,6 +2019,7 @@ export default function (pi: any) {
 			action: "Cleared",
 			skipLabel: "No rules for",
 			invalidLabel: "Unknown extension",
+			freezeWhenTransformers: true,
 			apply: (rules, key) => {
 				if (lastSeenExtKeys.length > 0 && !lastSeenExtKeys.includes(key)) {
 					return "invalid";
@@ -1790,10 +2044,125 @@ export default function (pi: any) {
 				ctx.ui.notify(`pi-tidy-footer: ${result.msg}`, "error");
 				return;
 			}
+			// remove user transformers (.ts files) — clean uninstall
+			const tfDir = readTransformersDir();
+			if (existsSync(tfDir)) {
+				try {
+					rmSync(tfDir, { recursive: true, force: true });
+				} catch (e) {
+					console.error("pi-tidy-footer: failed to remove transformers dir", e);
+				}
+			}
 			if (enabled) applyFooter(ctx);
 			ctx.ui.notify(
 				`pi-tidy-footer: ${result.msg} ${mcpResult.msg} You can now uninstall the package.`,
 				mcpResult.ok ? "info" : "error",
+			);
+		},
+	});
+
+	pi.registerCommand("edt", {
+		description:
+			"Manage transformer mode: on = user transformers take over (/ed frozen); off = return to /ed; d <key...> = disable transformer; e <key...> = enable; dir [path] = show/set user transformers dir; reload = re-read; no args = status",
+		handler: async (args: string, ctx: any) => {
+			const trimmed = args.trim();
+			if (!trimmed) {
+				ctx.ui.notify(
+					`Transformer mode: ${readTransformerMode() ? "ON" : "OFF"}. User transformers: ${join(readTransformersDir(), "eduser.ts")}`,
+					"info",
+				);
+				return;
+			}
+			const parts = trimmed.split(/\s+/);
+			const sub = parts[0];
+			const keys = parts.slice(1).filter(Boolean);
+			if (sub === "on") {
+				writeTransformerMode(true);
+				if (enabled) applyFooter(ctx);
+				ctx.ui.notify(
+					"Transformer mode: ON — user transformers take over extension display. /ed commands are frozen.",
+					"info",
+				);
+				return;
+			}
+			if (sub === "off") {
+				writeTransformerMode(false);
+				if (enabled) applyFooter(ctx);
+				ctx.ui.notify(
+					"Transformer mode: OFF — /ed commands control extension display again.",
+					"info",
+				);
+				return;
+			}
+			if (sub === "d" || sub === "e") {
+				if (keys.length === 0) {
+					ctx.ui.notify(`Usage: /edt ${sub} <key> [<key>...]`, "error");
+					return;
+				}
+				const disabled = new Set(readDisabledTransformerKeys());
+				const changed: string[] = [];
+				const skipped: string[] = [];
+				for (const k of keys) {
+					if (sub === "d") {
+						if (disabled.has(k)) skipped.push(k);
+						else {
+							disabled.add(k);
+							changed.push(k);
+						}
+					} else {
+						if (!disabled.has(k)) skipped.push(k);
+						else {
+							disabled.delete(k);
+							changed.push(k);
+						}
+					}
+				}
+				writeDisabledTransformerKeys([...disabled]);
+				disabledTransformerKeys = disabled;
+				if (enabled) applyFooter(ctx);
+				const changedMsg =
+					changed.length > 0
+						? `${sub === "d" ? "Disabled" : "Enabled"}: ${changed.join(", ")}`
+						: "";
+				const skipMsg =
+					skipped.length > 0
+						? `${sub === "d" ? "Already disabled" : "Not disabled"}: ${skipped.join(", ")}`
+						: "";
+				ctx.ui.notify(
+					[changedMsg, skipMsg].filter(Boolean).join(" | ") ||
+						`No transformer ${sub === "d" ? "disabled" : "enabled"}.`,
+					"info",
+				);
+				return;
+			}
+			if (sub === "dir") {
+				if (keys.length === 0) {
+					ctx.ui.notify(
+						`User transformers dir: ${readTransformersDir()}`,
+						"info",
+					);
+					return;
+				}
+				const newDir = keys.join(" ");
+				writeTransformersDir(newDir);
+				if (enabled) applyFooter(ctx);
+				ctx.ui.notify(`User transformers dir set to: ${newDir}`, "info");
+				return;
+			}
+			if (sub === "reload") {
+				await ensureUserTfFile();
+				tidyBuiltin = await readTidyBuiltin();
+				tidyUser = await readTidyUser();
+				if (enabled) applyFooter(ctx);
+				ctx.ui.notify(
+					`Reloaded transformers: ${Object.keys(tidyBuiltin).length} builtin, ${Object.keys(tidyUser).length} user transformer(s).`,
+					"info",
+				);
+				return;
+			}
+			ctx.ui.notify(
+				`Unknown subcommand: ${sub}. Usage: /edt on | off | d <key...> | e <key...> | dir [path] | reload`,
+				"error",
 			);
 		},
 	});
