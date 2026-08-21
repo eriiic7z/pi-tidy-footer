@@ -1,7 +1,7 @@
 {
   "name": "pi-tidy-footer",
-  "version": "1.0.0",
-  "description": "Tidy and better footer for Pi — native layout, layered with new features: live display of multi-currency token cost and account balance with color warnings; extension sorting, wrapping, and label tweaks; git file status; and tool activity indicators.",
+  "version": "1.1.0",
+  "description": "Tidy and better footer for Pi — native layout with new features: live display of multi-currency token cost and account balance with color warnings; extension sorting, wrapping, and display customization; git file status; and tool activity indicators.",
   "type": "module",
   "license": "MIT",
   "author": "eriiic7z",
@@ -10,19 +10,48 @@
     "type": "git",
     "url": "git+https://github.com/eriiic7z/pi-tidy-footer.git"
   },
-  "keywords": ["tidy-footer", "footer", "balance", "cost", "currency", "multi-currency", "token", "git", "sort", "wrap", "live", "statusline", "pi", "tui", "theme", "pi-package", "pi-extension"],
+  "keywords": [
+    "tidy-footer",
+    "footer",
+    "balance",
+    "cost",
+    "currency",
+    "multi-currency",
+    "token",
+    "git",
+    "sort",
+    "wrap",
+    "live",
+    "statusline",
+    "pi",
+    "tui",
+    "theme",
+    "pi-package",
+    "pi-extension"
+  ],
   "main": "extensions/pi-tidy-footer.ts",
-  "files": ["extensions", "README.md", "LICENSE"],
+  "files": [
+    "extensions",
+    "README.md",
+    "LICENSE"
+  ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1"
+    "@types/node": "^26.1.1",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/selfcheck.ts"
   },
   "pi": {
-    "extensions": ["./extensions"],
+    "extensions": [
+      "./extensions"
+    ],
     "image": "https://raw.githubusercontent.com/eriiic7z/pi-tidy-footer/main/assets/thumbnail.png"
   }
 }
