@@ -3,7 +3,7 @@
  *
  * This file is read-only for users: it ships inside the package and updates
  * with each release. To override a builtin transformer, declare the same key
- * in your user file (~/.pi/agent/extensions/pi-tidy-footer/transformers/user.ts)
+ * in your user file (~/.pi/agent/extensions/pi-tidy-footer/ed/eduser.ts)
  * — user transformers take precedence (last-write-wins).
  */
 
@@ -14,7 +14,6 @@ export interface TransformContext {
 }
 
 export interface StatusTransformer {
-	keys: string[];
 	transform(
 		key: string,
 		value: string,
@@ -24,7 +23,6 @@ export interface StatusTransformer {
 
 export const builtin: Record<string, StatusTransformer> = {
 	caveman: {
-		keys: ["caveman"],
 		transform(_key, value, { theme }) {
 			// keep the animated frame colours (raw ANSI intact); only the
 			// " space + colour-code + label " segment is replaced and the label
@@ -36,7 +34,6 @@ export const builtin: Record<string, StatusTransformer> = {
 		},
 	},
 	ponytail: {
-		keys: ["ponytail"],
 		transform(_key, value, { theme }) {
 			// drop the ⚡ level icon and the space between ○/● and 🐴,
 			// keep the indicator colour from the raw text

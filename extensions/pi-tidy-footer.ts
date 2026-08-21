@@ -1,6 +1,7 @@
 /**
- * pi-tidy-footer — removes cost ($) from the built-in Pi footer.
- * Toggle with /tf. State persists across restarts.
+ * pi-tidy-footer — tidy, extended footer for Pi: token cost/balance with
+ * currency conversion, extension display control (sort/wrap/rules), git
+ * status, tool activity. Toggle with /tf. State persists across restarts.
  */
 
 import {
@@ -9,6 +10,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -40,16 +42,8 @@ const BALANCE_SYMBOL_OPTIONS: Record<string, string> = {
 	"◉": "◉",
 };
 
-/**
- * Built-in default rewrite rules, applied when the user has not set a rule
- * for the same key. Visible in /ed; removable per-key by setting a user
- * rule (but the builtin itself is not deletable).
- *
- * NOTE: builtin transformations now ship in extensions/ed/ed.ts and are loaded
- * via readTidyBuiltin(); user ones live in the user dir as eduser.ts.
- */
-
 const FX_TTL_MS = 86_400_000;
+const FX_RETRY_MS = 60_000;
 const GIT_TIMEOUT_MS = 3000;
 const GIT_DEBOUNCE_MS = 250;
 const GIT_POLL_MS = 30_000;
@@ -81,8 +75,8 @@ function readTransformersDir(): string {
 	return d && d.trim() ? resolve(d) : DEFAULT_TRANSFORMERS_DIR;
 }
 
-function writeTransformersDir(dir: string): void {
-	mergeState({ transformersDir: dir });
+function writeTransformersDir(dir: string): boolean {
+	return mergeState({ transformersDir: dir });
 }
 
 // package dir: resolve the real path of this extension file (symlink → real
@@ -97,16 +91,94 @@ const PACKAGE_DIR = dirname(realpathSync(fileURLToPath(import.meta.url)));
 interface TransformContext {
 	raw: string;
 	plain: string;
-	theme: any;
+	theme: PiTheme;
 }
 
 interface StatusTransformer {
-	keys: string[];
 	transform(
 		key: string,
 		value: string,
 		ctx: TransformContext,
 	): string | null | undefined;
+}
+
+/* ------------------------------------------------------------------ */
+/*  pi runtime shapes — typed from actual call sites; optionality      */
+/*  follows runtime facts (model may be missing at session_start)     */
+/* ------------------------------------------------------------------ */
+
+interface PiTheme {
+	fg(color: string, text: string): string;
+}
+
+interface PiTui {
+	requestRender(): void;
+}
+
+interface PiFd {
+	getExtensionStatuses(): Map<string, string>;
+	getGitBranch(): string | undefined;
+	onBranchChange(cb: () => void): () => void;
+}
+
+interface PiModel {
+	id?: string;
+	provider?: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	cost?: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+	};
+}
+
+interface BranchEntry {
+	type: string;
+	message?: { role: string } & Partial<AssistantMessage>;
+}
+
+interface PiCtx {
+	ui: {
+		setFooter(
+			fn:
+				| ((
+						tui: PiTui,
+						theme: PiTheme,
+						fd: PiFd,
+				  ) => {
+						render(width: number): string[];
+						dispose(): void;
+				  })
+				| undefined,
+		): void;
+		notify(message: string, kind?: string): void;
+	};
+	sessionManager: {
+		getCwd(): string;
+		getSessionName(): string;
+		getBranch(): BranchEntry[];
+	};
+	model?: PiModel;
+	exec(
+		cmd: string,
+		args: string[],
+		opts: { cwd: string; timeout: number },
+	): Promise<{ code: number; killed: boolean; stdout: string }>;
+	getContextUsage(): { percent?: number; contextWindow?: number } | undefined;
+}
+
+interface PiApi {
+	on(event: string, cb: (event: { toolName: string }, ctx: PiCtx) => void): void;
+	registerCommand(
+		name: string,
+		def: {
+			description: string;
+			handler: (args: string, ctx: PiCtx) => Promise<void>;
+		},
+	): void;
+	getThinkingLevel?(): string;
 }
 
 /**
@@ -133,21 +205,11 @@ async function ensureUserTfFile(): Promise<void> {
 
 /**
  * Normalize a transformer export into a StatusTransformer record.
- * Accepts either the object form ({ keys, transform }) or a bare function
- * form (function(key, value, ctx) — applies to all keys via "*").
+ * Accepts the object form keyed by extension name.
  */
 function coerceTransformerMap(
 	exportObj: unknown,
 ): Record<string, StatusTransformer> {
-	if (typeof exportObj === "function") {
-		const fn = exportObj as StatusTransformer["transform"];
-		return {
-			"*": {
-				keys: ["*"],
-				transform: fn,
-			},
-		};
-	}
 	if (exportObj && typeof exportObj === "object" && !Array.isArray(exportObj)) {
 		return exportObj as Record<string, StatusTransformer>;
 	}
@@ -158,7 +220,10 @@ function coerceTransformerMap(
  * Read the builtin transformers from the shipped package file
  * (extensions/ed/ed.ts). Always active; updates with releases.
  */
-async function readTidyBuiltin(): Promise<Record<string, StatusTransformer>> {
+async function readTidyBuiltin(): Promise<Record<
+	string,
+	StatusTransformer
+> | null> {
 	try {
 		const url =
 			"file://" +
@@ -171,15 +236,18 @@ async function readTidyBuiltin(): Promise<Record<string, StatusTransformer>> {
 		return coerceTransformerMap((mod as any)?.builtin);
 	} catch (e) {
 		console.error("pi-tidy-footer: readTidyBuiltin failed", e);
+		return null;
 	}
-	return {};
 }
 
 /**
  * Read the user transformers from the user dir (eduser.ts). Active only when
  * transformer mode is on. User transformers override builtins by key.
  */
-async function readTidyUser(): Promise<Record<string, StatusTransformer>> {
+async function readTidyUser(): Promise<Record<
+	string,
+	StatusTransformer
+> | null> {
 	try {
 		const userFile = join(readTransformersDir(), "eduser.ts");
 		const url =
@@ -190,8 +258,8 @@ async function readTidyUser(): Promise<Record<string, StatusTransformer>> {
 		return coerceTransformerMap((mod as any)?.user);
 	} catch (e) {
 		console.error("pi-tidy-footer: readTidyUser failed", e);
+		return null;
 	}
-	return {};
 }
 
 let stateCache: Record<string, any> | null = null;
@@ -200,34 +268,55 @@ function loadState(): Record<string, any> {
 	if (stateCache) return stateCache;
 	try {
 		stateCache = JSON.parse(readFileSync(STATE_FILE, "utf-8"));
-	} catch {
-		stateCache = {};
+	} catch (e: any) {
+		if (e?.code === "ENOENT") {
+			// first run — no state file yet; silent
+			stateCache = {};
+		} else {
+			// corrupted state — keep evidence, then start fresh
+			try {
+				const ts = new Date().toISOString().replace(/[:.]/g, "-");
+				copyFileSync(STATE_FILE, `${STATE_FILE}.bak.${ts}`);
+				console.error(
+					`pi-tidy-footer: bad state backed up to ${STATE_FILE}.bak.${ts}`,
+				);
+			} catch {
+				/* backup failed — nothing more to do */
+			}
+			stateCache = {};
+		}
 	}
 	return stateCache!;
 }
 
 function readState<T>(key: string, fallback: T): T {
 	const raw = loadState();
-	return raw?.[key] != null ? raw[key] : fallback;
+	return raw?.[key] == null ? fallback : raw[key];
 }
 
-function mergeState(patch: Record<string, any>): void {
+/**
+ * Persist a patch atomically (tmp + rename — the target file never sees a
+ * half-written JSON). Returns false when the write failed; on failure the
+ * in-memory cache keeps the last known-good value and nothing is applied.
+ */
+function mergeState(patch: Record<string, any>): boolean {
 	const prev = loadState();
 	const next = { ...prev, ...patch };
 	try {
 		mkdirSync(STATE_DIR, { recursive: true });
-		writeFileSync(STATE_FILE, JSON.stringify(next), "utf-8");
+		const tmp = STATE_FILE + ".tmp";
+		writeFileSync(tmp, JSON.stringify(next), "utf-8");
+		existsSync(tmp) && renameSync(tmp, STATE_FILE);
 		Object.assign(prev, patch);
+		return true;
 	} catch (e) {
 		console.error("pi-tidy-footer: mergeState failed", e);
+		return false;
 	}
 }
 
 /* ------------------------------------------------------------------ */
-/* ------------------------------------------------------------------ */
-/* ------------------------------------------------------------------ */
 /*  transformers — builtin (package) + user (user dir)                */
-/* ------------------------------------------------------------------ */
 /* ------------------------------------------------------------------ */
 
 /** Transformer mode: off (default) = /ed commands control display; on = user transformers take over. */
@@ -235,8 +324,8 @@ function readTransformerMode(): boolean {
 	return readState("transformerMode", false);
 }
 
-function writeTransformerMode(on: boolean): void {
-	mergeState({ transformerMode: on });
+function writeTransformerMode(on: boolean): boolean {
+	return mergeState({ transformerMode: on });
 }
 
 /** Disabled transformer keys (via /edt d), persisted. */
@@ -244,15 +333,8 @@ function readDisabledTransformerKeys(): string[] {
 	return readState<string[]>("disabledTransformerKeys", []);
 }
 
-function writeDisabledTransformerKeys(keys: string[]): void {
-	mergeState({ disabledTransformerKeys: keys });
-}
-
-/**
- * Strip ANSI escape codes (used to build the `plain` field for transformers).
- */
-function stripAnsi(s: string): string {
-	return s.replace(/\x1b\[[0-9;]*m/g, "");
+function writeDisabledTransformerKeys(keys: string[]): boolean {
+	return mergeState({ disabledTransformerKeys: keys });
 }
 
 // Builtin transformers read from the package (extensions/ed/ed.ts),
@@ -272,8 +354,8 @@ function readPersistedEnabled(): boolean {
 	return readState("enabled", true);
 }
 
-function writePersistedEnabled(enabled: boolean): void {
-	mergeState({ enabled });
+function writePersistedEnabled(enabled: boolean): boolean {
+	return mergeState({ enabled });
 }
 
 function readThresholds(): { warn: number; alert: number } {
@@ -286,8 +368,11 @@ function readThresholds(): { warn: number; alert: number } {
 	return { warn: w, alert: a };
 }
 
-function writeThresholds(warn: number, alert: number): void {
-	mergeState({ balanceThresholdWarn: warn, balanceThresholdAlert: alert });
+function writeThresholds(warn: number, alert: number): boolean {
+	return mergeState({
+		balanceThresholdWarn: warn,
+		balanceThresholdAlert: alert,
+	});
 }
 
 function readCostThresholds(): { warn: number; alert: number } {
@@ -300,24 +385,24 @@ function readCostThresholds(): { warn: number; alert: number } {
 	return { warn: w, alert: a };
 }
 
-function writeCostThresholds(warn: number, alert: number): void {
-	mergeState({ costThresholdWarn: warn, costThresholdAlert: alert });
+function writeCostThresholds(warn: number, alert: number): boolean {
+	return mergeState({ costThresholdWarn: warn, costThresholdAlert: alert });
 }
 
 function readWrapEnabled(): boolean {
 	return readState("wrapEnabled", false);
 }
 
-function writeWrapEnabled(wrap: boolean): void {
-	mergeState({ wrapEnabled: wrap });
+function writeWrapEnabled(wrap: boolean): boolean {
+	return mergeState({ wrapEnabled: wrap });
 }
 
 function readEmojiHidden(): boolean {
 	return readState("emojiHidden", false);
 }
 
-function writeEmojiHidden(hidden: boolean): void {
-	mergeState({ emojiHidden: hidden });
+function writeEmojiHidden(hidden: boolean): boolean {
+	return mergeState({ emojiHidden: hidden });
 }
 
 function readExtensionOrder(): string[] {
@@ -329,8 +414,8 @@ function readExtensionOrder(): string[] {
 	]);
 }
 
-function writeExtensionOrder(order: string[]): void {
-	mergeState({ extensionOrder: order });
+function writeExtensionOrder(order: string[]): boolean {
+	return mergeState({ extensionOrder: order });
 }
 
 function readTransformRules(): Record<
@@ -342,72 +427,8 @@ function readTransformRules(): Record<
 
 function writeTransformRules(
 	rules: Record<string, { hide?: boolean; rewrite?: [string, string] }>,
-): void {
-	mergeState({ transformRules: rules });
-}
-
-/**
- * Expand a user pattern so ANSI colour codes between literal characters are
- * transparent (matched but preserved). Regex metacharacters and escape
- * sequences are left untouched.
- */
-function colorblindPattern(pattern: string): string {
-	const META = new Set("()[]{}^$.*+?|");
-	let out = "";
-	let inClass = false;
-	for (let i = 0; i < pattern.length; i++) {
-		const ch = pattern[i];
-		if (inClass) {
-			out += ch;
-			if (ch === "]") inClass = false;
-			continue;
-		}
-		if (ch === "[") {
-			out += ch;
-			inClass = true;
-			continue;
-		}
-		if (ch === "\\") {
-			out += ch + (pattern[i + 1] ?? "");
-			i++;
-			continue;
-		}
-		if (META.has(ch)) {
-			out += ch;
-			continue;
-		}
-		out += ch + "(?:\\x1b\\[[0-9;]*m)*";
-	}
-	return out;
-}
-
-/**
- * Apply one rewrite rule to text: regex match → replacement template
- * ({1} {2}... = captured groups). Returns original text on no match or
- * invalid regex. When `transparent` is true, user patterns match across
- * ANSI colour codes (colourblind). Default rules pass transparent=false.
- */
-function applyRewrite(
-	s: string,
-	rule: { hide?: boolean; rewrite?: [string, string] },
-	transparent = false,
-): string {
-	if (!rule?.rewrite) return s;
-	const [pattern, replacement] = rule.rewrite;
-	try {
-		const re = new RegExp(transparent ? colorblindPattern(pattern) : pattern);
-		const m = s.match(re);
-		if (m) {
-			let out = replacement;
-			for (let i = 1; i < m.length; i++) {
-				out = out.split(`{${i}}`).join(m[i] ?? "");
-			}
-			return s.replace(re, out);
-		}
-	} catch {
-		/* invalid regex — keep original */
-	}
-	return s;
+): boolean {
+	return mergeState({ transformRules: rules });
 }
 
 /**
@@ -505,11 +526,7 @@ function mutateMcpConfig(
 		}
 		const result = mutate(cfg);
 		if (result.ok && result.changed !== false) {
-			writeFileSync(
-				MCP_CONFIG_PATH,
-				JSON.stringify(cfg, null, 2) + "\n",
-				"utf-8",
-			);
+			writeFileSync(MCP_CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
 		}
 		return result;
 	} catch (e) {
@@ -523,8 +540,8 @@ function readCostCurrency(): string {
 	return CURRENCIES[ccy] ? ccy : "USD";
 }
 
-function writeCostCurrency(ccy: string): void {
-	mergeState({ costCurrency: ccy });
+function writeCostCurrency(ccy: string): boolean {
+	return mergeState({ costCurrency: ccy });
 }
 
 function readBalanceSymbol(): string {
@@ -535,8 +552,8 @@ function readBalanceSymbolList(): string[] {
 	return readState<string[]>("balanceSymbols", []);
 }
 
-function writeBalanceSymbolList(syms: string[]): void {
-	mergeState({ balanceSymbols: syms });
+function writeBalanceSymbolList(syms: string[]): boolean {
+	return mergeState({ balanceSymbols: syms });
 }
 
 function getEffectiveSymbols(): string[] {
@@ -550,8 +567,8 @@ function getEffectiveSymbols(): string[] {
 	return result;
 }
 
-function writeBalanceSymbol(sym: string): void {
-	mergeState({ balanceSymbol: sym });
+function writeBalanceSymbol(sym: string): boolean {
+	return mergeState({ balanceSymbol: sym });
 }
 
 function readFxCache(): {
@@ -648,22 +665,98 @@ async function fetchBalance(
 /*  helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-function ccyRate(
-	ccy: string,
-	rates: Record<string, number> | null | undefined,
-): number | undefined {
-	if (ccy === "USD") return 1;
-	return rates?.[ccy.toLowerCase()] ?? undefined;
+/**
+ * Strip ANSI escape codes (used to build the `plain` field for transformers).
+ */
+export function stripAnsi(s: string): string {
+	return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-function fmtTok(n: number): string {
+/**
+ * Expand a user pattern so ANSI colour codes between literal characters are
+ * transparent (matched but not part of the replacement). Regex metacharacters
+ * and escape sequences are left untouched. The transparent group is
+ * non-greedy so a trailing reset code after the match survives the rewrite.
+ */
+export function colorblindPattern(pattern: string): string {
+	const META = new Set("()[]{}^$.*+?|");
+	let out = "";
+	let inClass = false;
+	for (let i = 0; i < pattern.length; i++) {
+		const ch = pattern[i];
+		if (inClass) {
+			out += ch;
+			if (ch === "]") inClass = false;
+			continue;
+		}
+		if (ch === "[") {
+			out += ch;
+			inClass = true;
+			continue;
+		}
+		if (ch === "\\") {
+			out += ch + (pattern[i + 1] ?? "");
+			i++;
+			continue;
+		}
+		if (META.has(ch)) {
+			out += ch;
+			continue;
+		}
+		out += ch + "(?:\\x1b\\[[0-9;]*m)*?";
+	}
+	return out;
+}
+
+/**
+ * Apply one rewrite rule to text: regex match → replacement template
+ * ({1} {2}... = captured groups). Returns original text on no match or
+ * invalid regex. When `transparent` is true, user patterns match across
+ * ANSI colour codes (colourblind). Default rules pass transparent=false.
+ */
+export function applyRewrite(
+	s: string,
+	rule: { hide?: boolean; rewrite?: [string, string] },
+	transparent = false,
+): string {
+	if (!rule?.rewrite) return s;
+	const [pattern, replacement] = rule.rewrite;
+	try {
+		const re = new RegExp(transparent ? colorblindPattern(pattern) : pattern);
+		const m = s.match(re);
+		if (m) {
+			let out = replacement;
+			for (let i = 1; i < m.length; i++) {
+				out = out.split(`{${i}}`).join(m[i] ?? "");
+			}
+			return s.replace(re, out);
+		}
+	} catch {
+		/* invalid regex — keep original */
+	}
+	return s;
+}
+
+/**
+ * Split command args into tokens, stripping surrounding double quotes
+ * ("a b" stays one token). Empty tokens are dropped.
+ */
+export function parseArgs(args: string): string[] {
+	return (args.match(/("[^"]*"|\S+)/g) ?? [])
+		.map((s) =>
+			s.length >= 2 && s[0] === '"' && s.at(-1) === '"' ? s.slice(1, -1) : s,
+		)
+		.filter(Boolean);
+}
+
+export function fmtTok(n: number): string {
 	if (n < 1000) return `${n}`;
 	if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
 	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
 	return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-function fmtCwd(cwd: string, home: string | undefined): string {
+export function fmtCwd(cwd: string, home: string | undefined): string {
 	if (!home) return cwd;
 	const rc = resolve(cwd);
 	const rh = resolve(home);
@@ -673,51 +766,7 @@ function fmtCwd(cwd: string, home: string | undefined): string {
 	return cwd;
 }
 
-function fmtCost(
-	inp: number,
-	out: number,
-	cr: number,
-	cw: number,
-	model: any,
-	ccy: string,
-	fx: Record<string, number> | null,
-	costThresholds: { warn: number; alert: number },
-): { text: string; color: string } {
-	const rate = ccyRate(ccy, fx);
-	const info = CURRENCIES[ccy] ?? CURRENCIES.USD;
-	if (rate === undefined) {
-		return { text: `${info.symbol}--`, color: "dim" };
-	}
-	const hasCost =
-		model.cost?.input != null ||
-		model.cost?.output != null ||
-		model.cost?.cacheRead != null ||
-		model.cost?.cacheWrite != null;
-	const cost = hasCost
-		? (inp / 1_000_000) * (model.cost?.input ?? 0) +
-			(out / 1_000_000) * (model.cost?.output ?? 0) +
-			(cr / 1_000_000) * (model.cost?.cacheRead ?? 0) +
-			(cw / 1_000_000) * (model.cost?.cacheWrite ?? 0)
-		: undefined;
-	if (cost === undefined) {
-		return {
-			text: `${info.symbol}--`,
-			color: "dim",
-		};
-	}
-	const local = cost * rate;
-	const tWarn = costThresholds.warn * rate;
-	const tAlert = costThresholds.alert * rate;
-	const color = thresholdColor(local, tWarn, tAlert, "higher");
-	return {
-		text: `${info.symbol}${local.toFixed(info.decimals)}`,
-		color,
-	};
-}
-
-/* ------------------------------------------------------------------ */
-
-function parseGitStatusTokens(stdout: string): string {
+export function parseGitStatusTokens(stdout: string): string {
 	let ahead = 0,
 		behind = 0,
 		staged = 0,
@@ -761,8 +810,56 @@ function parseGitStatusTokens(stdout: string): string {
 	return parts.join(" ");
 }
 
-/* ------------------------------------------------------------------ */
-/*  tool activity                                                      */
+function ccyRate(
+	ccy: string,
+	rates: Record<string, number> | null | undefined,
+): number | undefined {
+	if (ccy === "USD") return 1;
+	return rates?.[ccy.toLowerCase()] ?? undefined;
+}
+
+function fmtCost(
+	inp: number,
+	out: number,
+	cr: number,
+	cw: number,
+	model: PiModel | undefined,
+	ccy: string,
+	fx: Record<string, number> | null,
+	costThresholds: { warn: number; alert: number },
+): { text: string; color: string } {
+	const rate = ccyRate(ccy, fx);
+	const info = CURRENCIES[ccy] ?? CURRENCIES.USD;
+	if (rate === undefined) {
+		return { text: `${info.symbol}--`, color: "dim" };
+	}
+	const hasCost =
+		model?.cost?.input != null ||
+		model?.cost?.output != null ||
+		model?.cost?.cacheRead != null ||
+		model?.cost?.cacheWrite != null;
+	const cost = hasCost
+		? (inp / 1_000_000) * (model?.cost?.input ?? 0) +
+			(out / 1_000_000) * (model?.cost?.output ?? 0) +
+			(cr / 1_000_000) * (model?.cost?.cacheRead ?? 0) +
+			(cw / 1_000_000) * (model?.cost?.cacheWrite ?? 0)
+		: undefined;
+	if (cost === undefined) {
+		return {
+			text: `${info.symbol}--`,
+			color: "dim",
+		};
+	}
+	const local = cost * rate;
+	const tWarn = costThresholds.warn * rate;
+	const tAlert = costThresholds.alert * rate;
+	const color = thresholdColor(local, tWarn, tAlert, "higher");
+	return {
+		text: `${info.symbol}${local.toFixed(info.decimals)}`,
+		color,
+	};
+}
+
 /* ------------------------------------------------------------------ */
 
 function thresholdColor(
@@ -795,11 +892,7 @@ function formatToolActivity(state: ToolActivityState): string {
 	if (active.length > 0) {
 		const [name, count] = active[0];
 		const suffix =
-			count > 1
-				? `×${count}`
-				: active.length > 1
-					? `+${active.length - 1}`
-					: "";
+			count > 1 ? `×${count}` : active.length > 1 ? `+${active.length - 1}` : "";
 		return `⚙ ${name}${suffix}`;
 	}
 	// hold the last finished tool briefly to prevent flicker
@@ -815,10 +908,10 @@ function formatToolActivity(state: ToolActivityState): string {
 /* ------------------------------------------------------------------ */
 
 function makeFooter(
-	ctx: any,
-	tui: any,
-	theme: any,
-	fd: any,
+	ctx: PiCtx,
+	tui: PiTui,
+	theme: PiTheme,
+	fd: PiFd,
 	toolState: ToolActivityState,
 	live: LiveHooks,
 	thresholds: { warn: number; alert: number },
@@ -833,6 +926,7 @@ function makeFooter(
 	let gitQueued = false;
 	let gitRetryCount = 0;
 	let gitDebounce: ReturnType<typeof setTimeout> | undefined;
+	let fxRetryTimer: ReturnType<typeof setTimeout> | undefined;
 	let balanceText = "";
 	let balanceProvider = "";
 	let balanceStale = false;
@@ -861,13 +955,21 @@ function makeFooter(
 				const data = (await resp.json()) as any;
 				const rates: Record<string, number> = data?.usd ?? {};
 				delete rates.date;
-				if (Object.keys(rates).length === 0) return;
+				// empty payload is a failure too — route through catch for retry
+				if (Object.keys(rates).length === 0) throw new Error("empty fx rates");
 				fxCache = { rates, fetchedAt: Date.now() };
 				writeFxCache(fxCache);
 				if (!disposed) tui.requestRender();
 			} catch (e) {
 				console.error("pi-tidy-footer: refreshFx failed", e);
-				/* keep old cache */
+				// recovery retry (not a polling loop): schedule one retry after
+				// FX_RETRY_MS; stops as soon as the fetch succeeds
+				if (!disposed && !fxRetryTimer) {
+					fxRetryTimer = setTimeout(() => {
+						fxRetryTimer = undefined;
+						refreshFx();
+					}, FX_RETRY_MS);
+				}
 			}
 		})();
 	};
@@ -900,7 +1002,7 @@ function makeFooter(
 					result.code === 0 && !result.killed
 						? parseGitStatusTokens(result.stdout)
 						: "";
-				gitRetryCount = 0;
+				if (result.code === 0 && !result.killed) gitRetryCount = 0;
 			} catch {
 				gitTokens = "";
 			} finally {
@@ -939,7 +1041,7 @@ function makeFooter(
 	const runBalance = () => {
 		if (disposed) return;
 		const provider = ctx.model?.provider;
-		if (!BALANCE_PROVIDER_KEYS.has(provider)) {
+		if (!provider || !BALANCE_PROVIDER_KEYS.has(provider)) {
 			balanceText = "";
 			balanceProvider = "";
 			balanceStale = false;
@@ -966,13 +1068,13 @@ function makeFooter(
 				if (disposed || ctx.model?.provider !== provider) {
 					balanceText = "";
 					balanceProvider = "";
-				} else if (value !== undefined) {
+				} else if (value === undefined) {
+					balanceText = "";
+					balanceProvider = "";
+				} else {
 					balanceLastFetch = now;
 					balanceText = `${balanceSymbol}${value}`;
 					balanceStale = false;
-				} else {
-					balanceText = "";
-					balanceProvider = "";
 				}
 			} catch (e) {
 				console.error("pi-tidy-footer: fetchBalance failed", e);
@@ -998,6 +1100,7 @@ function makeFooter(
 			unsub();
 			clearInterval(gitInterval);
 			if (gitDebounce) clearTimeout(gitDebounce);
+			if (fxRetryTimer) clearTimeout(fxRetryTimer);
 			live.requestRender = undefined;
 			live.refreshGit = undefined;
 			live.refreshBalance = undefined;
@@ -1013,16 +1116,16 @@ function makeFooter(
 					cw = 0;
 				let hitRate: number | undefined;
 				for (const e of session.getBranch()) {
-					if (e.type === "message" && e.message.role === "assistant") {
+					if (e.type === "message" && e.message?.role === "assistant") {
 						const msg = e.message as AssistantMessage;
-						inp += msg.usage.input;
-						out += msg.usage.output;
-						cr += msg.usage.cacheRead;
-						cw += msg.usage.cacheWrite;
+						const u = msg.usage;
+						inp += u?.input ?? 0;
+						out += u?.output ?? 0;
+						cr += u?.cacheRead ?? 0;
+						cw += u?.cacheWrite ?? 0;
 						const prompt =
-							msg.usage.input + msg.usage.cacheRead + msg.usage.cacheWrite;
-						hitRate =
-							prompt > 0 ? (msg.usage.cacheRead / prompt) * 100 : undefined;
+							(u?.input ?? 0) + (u?.cacheRead ?? 0) + (u?.cacheWrite ?? 0);
+						hitRate = prompt > 0 ? ((u?.cacheRead ?? 0) / prompt) * 100 : undefined;
 					}
 				}
 
@@ -1030,7 +1133,7 @@ function makeFooter(
 				const cu = ctx.getContextUsage();
 				const ctxWin = cu?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 				const pct = cu?.percent ?? 0;
-				const pctStr = cu?.percent != null ? pct.toFixed(1) : "?";
+				const pctStr = cu?.percent == null ? "?" : pct.toFixed(1);
 
 				/* pwd / git */
 				let pwd = fmtCwd(
@@ -1054,9 +1157,7 @@ function makeFooter(
 				if ((cr || cw) && hitRate !== undefined)
 					parts.push(`CH${hitRate.toFixed(1)}%`);
 				const ctxPctDisp =
-					pctStr === "?"
-						? `?/${fmtTok(ctxWin)}`
-						: `${pctStr}%/${fmtTok(ctxWin)}`;
+					pctStr === "?" ? `?/${fmtTok(ctxWin)}` : `${pctStr}%/${fmtTok(ctxWin)}`;
 				const ctxPctStr = theme.fg("dim", ctxPctDisp);
 				parts.push(ctxPctStr);
 				const result = fmtCost(
@@ -1088,11 +1189,7 @@ function makeFooter(
 				const balanceTextVal = balanceText;
 				const balanceProviderVal = ctx.model?.provider;
 				let balanceSeg = "";
-				if (
-					balanceTextVal &&
-					balanceProviderVal === balanceProvider &&
-					fxCache
-				) {
+				if (balanceTextVal && balanceProviderVal === balanceProvider && fxCache) {
 					const rawNum = Number.parseFloat(
 						balanceTextVal.slice(balanceSymbol.length),
 					);
@@ -1110,9 +1207,9 @@ function makeFooter(
 						}
 						const tWarn = thresholds.warn * rate;
 						const tAlert = thresholds.alert * rate;
-						const color = !Number.isFinite(displayNum)
-							? "dim"
-							: thresholdColor(displayNum, tWarn, tAlert, "lower");
+						const color = Number.isFinite(displayNum)
+							? thresholdColor(displayNum, tWarn, tAlert, "lower")
+							: "dim";
 						const info = CURRENCIES[costCurrency] ?? CURRENCIES.USD;
 						const displayPrefix =
 							(BALANCE_SYMBOL_OPTIONS[balanceSymbol] ?? balanceSymbol) + " ";
@@ -1173,7 +1270,7 @@ function makeFooter(
 							.sort(([a], [b]) => {
 								const oa = order.get(a) ?? 99;
 								const ob = order.get(b) ?? 99;
-								return oa !== ob ? oa - ob : a.localeCompare(b);
+								return oa === ob ? a.localeCompare(b) : oa - ob;
 							})
 							.flatMap(([k, v]) => {
 								// transformers: builtin (always) then user (mode on).
@@ -1191,10 +1288,7 @@ function makeFooter(
 										if (r === null || r === undefined) return "";
 										return r;
 									} catch (e) {
-										console.error(
-											`pi-tidy-footer: transformer for key "${k}" threw:`,
-											e,
-										);
+										console.error(`pi-tidy-footer: transformer for key "${k}" threw:`, e);
 										return v.trim();
 									}
 								};
@@ -1233,13 +1327,10 @@ function makeFooter(
 				// (adapter reads config at startup; restart applies it)
 				if (!readState("mcpCompactInjected", false)) {
 					const rawMcp = raw.get("mcp");
-					if (
-						rawMcp !== undefined &&
-						/servers? enabled/.test(rawMcp as string)
-					) {
+					if (rawMcp !== undefined && /servers? enabled/.test(rawMcp as string)) {
 						const result = ensureMcpCompact();
-						mergeState({ mcpCompactInjected: true });
 						if (result.ok) {
+							mergeState({ mcpCompactInjected: true });
 							console.log(
 								"pi-tidy-footer: " +
 									result.msg +
@@ -1281,19 +1372,13 @@ function makeFooter(
 						}
 						// ponytail: last-resort truncation only if a single entry exceeds terminal width
 						if (current && visibleWidth(current) > width) {
-							lines.push(
-								truncateToWidth(current, width, theme.fg("dim", "...")),
-							);
+							lines.push(truncateToWidth(current, width, theme.fg("dim", "...")));
 						} else if (current) {
 							lines.push(current);
 						}
 					} else {
-						const statusLine = extItems
-							.map(([, t]) => formatMcpItem(t))
-							.join(" ");
-						lines.push(
-							truncateToWidth(statusLine, width, theme.fg("dim", "...")),
-						);
+						const statusLine = extItems.map(([, t]) => formatMcpItem(t)).join(" ");
+						lines.push(truncateToWidth(statusLine, width, theme.fg("dim", "...")));
 					}
 				}
 
@@ -1320,7 +1405,7 @@ function makeFooter(
 let lastSeenExtKeys: string[] = [];
 let lastSeenExtStatuses: Map<string, string> = new Map();
 
-export default function (pi: any) {
+export default function (pi: PiApi) {
 	const toolState: ToolActivityState = {
 		active: new Map(),
 		minDisplayQueue: [],
@@ -1333,14 +1418,18 @@ export default function (pi: any) {
 		getThinkingLevel: undefined,
 	};
 
-	function applyFooter(ctx: any) {
+	// last render theme, cached for /edr baseline simulation
+	let lastTheme: PiTheme | undefined;
+
+	function applyFooter(ctx: PiCtx) {
 		const thresholds = readThresholds();
 		const costThresholds = readCostThresholds();
 		const extensionOrder = readExtensionOrder();
 		const balanceSymbol = readBalanceSymbol();
 		const userRules = readTransformRules();
-		ctx.ui.setFooter((tui: any, theme: any, fd: any) =>
-			makeFooter(
+		ctx.ui.setFooter((tui: PiTui, theme: PiTheme, fd: PiFd) => {
+			lastTheme = theme;
+			return makeFooter(
 				ctx,
 				tui,
 				theme,
@@ -1352,8 +1441,8 @@ export default function (pi: any) {
 				extensionOrder,
 				balanceSymbol,
 				userRules,
-			),
-		);
+			);
+		});
 	}
 
 	function getCurrentRate(): number | undefined {
@@ -1361,8 +1450,13 @@ export default function (pi: any) {
 		return ccyRate(ccy, readFxCache()?.rates);
 	}
 
-	function guardEnabled(fn: (args: string, ctx: any) => Promise<void>) {
-		return async (args: string, ctx: any) => {
+	/** Refresh footer after a config change; no-op when footer is off. */
+	const commitFooter = (ctx: PiCtx) => {
+		if (enabled) applyFooter(ctx);
+	};
+
+	function guardEnabled(fn: (args: string, ctx: PiCtx) => Promise<void>) {
+		return async (args: string, ctx: PiCtx) => {
 			if (!enabled) {
 				ctx.ui.notify(
 					"Command unavailable: pi-tidy-footer disabled. Use /tf to enable.",
@@ -1378,8 +1472,8 @@ export default function (pi: any) {
 	 * Like guardEnabled, but also freezes the /ed rule commands when
 	 * transformer mode is on (user transformers take over).
 	 */
-	function guardRuleCommands(fn: (args: string, ctx: any) => Promise<void>) {
-		return guardEnabled(async (args: string, ctx: any) => {
+	function guardRuleCommands(fn: (args: string, ctx: PiCtx) => Promise<void>) {
+		return guardEnabled(async (args: string, ctx: PiCtx) => {
 			if (readTransformerMode()) {
 				ctx.ui.notify(
 					"Command unavailable: transformer mode is on — user transformers manage extension display. Use /edt off to return to /ed commands.",
@@ -1407,13 +1501,8 @@ export default function (pi: any) {
 		applyAll?: (rules: Record<string, any>) => number | void;
 		freezeWhenTransformers?: boolean;
 	}) {
-		const guarded = async (args: string, ctx: any) => {
-			const parts = args.match(/("[^"]*"|\S+)/g) ?? [];
-			const unquote = (s: string) =>
-				s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"'
-					? s.slice(1, -1)
-					: s;
-			const keys = parts.map(unquote).filter(Boolean);
+		const guarded = async (args: string, ctx: PiCtx) => {
+			const keys = parseArgs(args);
 			if (keys.length === 0) {
 				ctx.ui.notify(
 					`Usage: /${opts.cmd} <key> [key...] — quote keys containing spaces`,
@@ -1429,8 +1518,11 @@ export default function (pi: any) {
 			if (keys.length === 1 && keys[0] === "all") {
 				if (opts.applyAll) {
 					const count = opts.applyAll(rules) ?? 0;
-					writeTransformRules(rules);
-					if (enabled) applyFooter(ctx);
+					if (!writeTransformRules(rules)) {
+						ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+						return;
+					}
+					commitFooter(ctx);
 					ctx.ui.notify(
 						count > 0
 							? `${opts.action} all: ${count} rule${count > 1 ? "s" : ""}`
@@ -1448,10 +1540,12 @@ export default function (pi: any) {
 				else if (r === "invalid") invalid.push(key);
 				else done.push(key);
 			}
-			writeTransformRules(rules);
-			if (enabled) applyFooter(ctx);
-			const doneMsg =
-				done.length > 0 ? `${opts.action}: ${done.join(", ")}` : "";
+			if (!writeTransformRules(rules)) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
+			const doneMsg = done.length > 0 ? `${opts.action}: ${done.join(", ")}` : "";
 			const skipMsg =
 				skipped.length > 0 ? `${opts.skipLabel}: ${skipped.join(", ")}` : "";
 			const invalidMsg =
@@ -1471,7 +1565,7 @@ export default function (pi: any) {
 
 	let enabled = readPersistedEnabled();
 
-	pi.on("session_start", async (_event: any, ctx: any) => {
+	pi.on("session_start", async (_event, ctx: PiCtx) => {
 		enabled = readPersistedEnabled();
 		toolState.active.clear();
 		toolState.minDisplayQueue.length = 0;
@@ -1480,16 +1574,16 @@ export default function (pi: any) {
 		// ensure the user transformers dir + eduser.ts exist
 		await ensureUserTfFile();
 		// load builtin transformers from the package (always active)
-		tidyBuiltin = await readTidyBuiltin();
+		tidyBuiltin = (await readTidyBuiltin()) ?? {};
 		// load user transformers (active only in transformer mode)
-		tidyUser = await readTidyUser();
+		tidyUser = (await readTidyUser()) ?? {};
 		// load disabled transformer keys
 		disabledTransformerKeys = new Set(readDisabledTransformerKeys());
-		if (enabled) applyFooter(ctx);
+		commitFooter(ctx);
 		live.getThinkingLevel = () => pi.getThinkingLevel?.() ?? "off";
 	});
 
-	pi.on("tool_execution_start", (event: any) => {
+	pi.on("tool_execution_start", (event) => {
 		toolState.active.set(
 			event.toolName,
 			(toolState.active.get(event.toolName) ?? 0) + 1,
@@ -1497,12 +1591,16 @@ export default function (pi: any) {
 		live.requestRender?.();
 	});
 
-	pi.on("tool_execution_end", (event: any) => {
+	pi.on("tool_execution_end", (event) => {
 		const n = toolState.active.get(event.toolName) ?? 0;
 		if (n <= 1) toolState.active.delete(event.toolName);
 		else toolState.active.set(event.toolName, n - 1);
 		// minimum 150ms display so fast tools don't flicker
-		if (!toolState.active.has(event.toolName)) {
+		if (toolState.active.has(event.toolName)) {
+			toolState.minDisplayQueue = toolState.minDisplayQueue.filter(
+				(q) => q !== event.toolName,
+			);
+		} else {
 			if (!toolState.minDisplayQueue.includes(event.toolName)) {
 				toolState.minDisplayQueue.push(event.toolName);
 			}
@@ -1512,10 +1610,6 @@ export default function (pi: any) {
 				toolState.minDisplayTimer = undefined;
 				live.requestRender?.();
 			}, STATUS_MIN_MS);
-		} else {
-			toolState.minDisplayQueue = toolState.minDisplayQueue.filter(
-				(q) => q !== event.toolName,
-			);
 		}
 		live.requestRender?.();
 		live.refreshGit?.();
@@ -1544,9 +1638,13 @@ export default function (pi: any) {
 
 	pi.registerCommand("tf", {
 		description: "Toggle pi-tidy-footer ENABLED/DISABLED",
-		handler: async (_args: string, ctx: any) => {
+		handler: async (_args: string, ctx: PiCtx) => {
 			enabled = !enabled;
-			writePersistedEnabled(enabled);
+			if (!writePersistedEnabled(enabled)) {
+				enabled = !enabled; // roll back
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
 
 			if (enabled) {
 				applyFooter(ctx);
@@ -1564,7 +1662,7 @@ export default function (pi: any) {
 	pi.registerCommand("sc", {
 		description:
 			"Currency for balance and cost: /sc <code> = set; no args = show",
-		handler: guardEnabled(async (args: string, ctx: any) => {
+		handler: guardEnabled(async (args: string, ctx: PiCtx) => {
 			const ccy = args.trim().toUpperCase();
 			if (!ccy) {
 				const current = readCostCurrency();
@@ -1577,14 +1675,14 @@ export default function (pi: any) {
 			}
 			if (!CURRENCIES[ccy]) {
 				const list = CCY_LIST;
-				ctx.ui.notify(
-					`Invalid currency: "${ccy}". Available: ${list}`,
-					"error",
-				);
+				ctx.ui.notify(`Invalid currency: "${ccy}". Available: ${list}`, "error");
 				return;
 			}
-			writeCostCurrency(ccy);
-			if (enabled) applyFooter(ctx);
+			if (!writeCostCurrency(ccy)) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
 			ctx.ui.notify(
 				`Currency: ${ccy} (${CURRENCIES[ccy].symbol}). You may want to adjust balance (/bt) and cost (/ct) thresholds.`,
 				"info",
@@ -1598,10 +1696,10 @@ export default function (pi: any) {
 		comparison: ">" | "<";
 		direction: "greater" | "less";
 		readFn: () => { warn: number; alert: number };
-		writeFn: (w: number, a: number) => void;
+		writeFn: (w: number, a: number) => boolean;
 		defaults: { warn: number; alert: number };
-	}): (args: string, ctx: any) => Promise<void> {
-		return guardEnabled(async (args: string, ctx: any) => {
+	}): (args: string, ctx: PiCtx) => Promise<void> {
+		return guardEnabled(async (args: string, ctx: PiCtx) => {
 			const parts = args.trim().split(/\s+/);
 			if (!args.trim()) {
 				const t = opts.readFn();
@@ -1643,8 +1741,12 @@ export default function (pi: any) {
 				ctx.ui.notify("FX rate unavailable, try again later.", "info");
 				return;
 			}
-			opts.writeFn(warn / rate, alert / rate);
-			if (enabled) applyFooter(ctx);
+			const ok = opts.writeFn(warn / rate, alert / rate);
+			if (!ok) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
 			ctx.ui.notify(
 				`${opts.label}: yellow ${opts.comparison} ${warn}, red ${opts.comparison} ${alert} (${ccy})`,
 				"info",
@@ -1669,7 +1771,7 @@ export default function (pi: any) {
 	pi.registerCommand("bs", {
 		description:
 			"Balance symbol: no args = cycle; <symbol> = set; -d <symbol> = delete",
-		handler: guardEnabled(async (args: string, ctx: any) => {
+		handler: guardEnabled(async (args: string, ctx: PiCtx) => {
 			if (args.startsWith("-d ")) {
 				let sym = args.replace(/^-d\s+/, "");
 				if (sym.startsWith('"') && sym.endsWith('"')) {
@@ -1689,11 +1791,15 @@ export default function (pi: any) {
 					return;
 				}
 				custom.splice(idx, 1);
-				writeBalanceSymbolList(custom);
+				let ok = writeBalanceSymbolList(custom);
 				if (readBalanceSymbol() === sym) {
-					writeBalanceSymbol("⛽");
+					ok = writeBalanceSymbol("⛽") && ok;
 				}
-				if (enabled) applyFooter(ctx);
+				if (!ok) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
+				commitFooter(ctx);
 				const display = sym.endsWith(" ")
 					? sym.trimEnd() + " (with trailing space)"
 					: sym;
@@ -1709,32 +1815,36 @@ export default function (pi: any) {
 				return;
 			}
 			const trimmed = args.trim();
-			if (!trimmed) {
+			if (trimmed) {
+				let sym = args;
+				if (args.length >= 2 && args[0] === '"' && args[args.length - 1] === '"') {
+					sym = args.slice(1, -1);
+				}
+				const custom = readBalanceSymbolList();
+				let ok = true;
+				if (!custom.includes(sym)) {
+					custom.push(sym);
+					ok = writeBalanceSymbolList(custom);
+				}
+				ok = writeBalanceSymbol(sym) && ok;
+				if (!ok) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
+				commitFooter(ctx);
+				const display = BALANCE_SYMBOL_OPTIONS[sym] ?? sym;
+				ctx.ui.notify(`Balance symbol: ${display}`, "info");
+			} else {
 				const keys = getEffectiveSymbols();
 				const current = readBalanceSymbol();
 				const idx = keys.indexOf(current);
 				const next = keys[(idx + 1) % keys.length];
-				writeBalanceSymbol(next);
-				if (enabled) applyFooter(ctx);
+				if (!writeBalanceSymbol(next)) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
+				commitFooter(ctx);
 				const display = BALANCE_SYMBOL_OPTIONS[next] ?? next;
-				ctx.ui.notify(`Balance symbol: ${display}`, "info");
-			} else {
-				let sym = args;
-				if (
-					args.length >= 2 &&
-					args[0] === '"' &&
-					args[args.length - 1] === '"'
-				) {
-					sym = args.slice(1, -1);
-				}
-				const custom = readBalanceSymbolList();
-				if (!custom.includes(sym)) {
-					custom.push(sym);
-					writeBalanceSymbolList(custom);
-				}
-				writeBalanceSymbol(sym);
-				if (enabled) applyFooter(ctx);
-				const display = BALANCE_SYMBOL_OPTIONS[sym] ?? sym;
 				ctx.ui.notify(`Balance symbol: ${display}`, "info");
 			}
 		}),
@@ -1756,7 +1866,7 @@ export default function (pi: any) {
 
 	pi.registerCommand("es", {
 		description: "Extension sort: keys = set order; no args = show order",
-		handler: guardEnabled(async (args: string, ctx: any) => {
+		handler: guardEnabled(async (args: string, ctx: PiCtx) => {
 			const trimmed = args.trim();
 			if (!trimmed) {
 				const current = readExtensionOrder();
@@ -1765,31 +1875,37 @@ export default function (pi: any) {
 			}
 			const keys = trimmed.split(/\s+/);
 			// ponytail: keys silently accepted, unknown keys sorted to end
-			writeExtensionOrder(keys);
-			if (enabled) applyFooter(ctx);
+			if (!writeExtensionOrder(keys)) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
 			ctx.ui.notify(`Order set to: ${keys.join(" ")}`, "info");
 		}),
 	});
 
 	pi.registerCommand("ew", {
 		description: "Toggle extension wrap ON/OFF",
-		handler: guardEnabled(async (_args: string, ctx: any) => {
+		handler: guardEnabled(async (_args: string, ctx: PiCtx) => {
 			const next = !readWrapEnabled();
-			writeWrapEnabled(next);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(
-				next ? "Extension wrap: ON" : "Extension wrap: OFF",
-				"info",
-			);
+			if (!writeWrapEnabled(next)) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
+			ctx.ui.notify(next ? "Extension wrap: ON" : "Extension wrap: OFF", "info");
 		}),
 	});
 
 	pi.registerCommand("ede", {
 		description: "Toggle extension emoji hiding ON/OFF",
-		handler: guardRuleCommands(async (_args: string, ctx: any) => {
+		handler: guardRuleCommands(async (_args: string, ctx: PiCtx) => {
 			const next = !readEmojiHidden();
-			writeEmojiHidden(next);
-			if (enabled) applyFooter(ctx);
+			if (!writeEmojiHidden(next)) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
 			ctx.ui.notify(
 				next
 					? "Extension emoji: HIDDEN"
@@ -1802,7 +1918,7 @@ export default function (pi: any) {
 	pi.registerCommand("ed", {
 		description:
 			"Extension display rules: list all extension status keys with their rules; quote keys containing spaces",
-		handler: guardEnabled(async (_args: string, ctx: any) => {
+		handler: guardEnabled(async (_args: string, ctx: PiCtx) => {
 			// transformer mode on: user transformers take over display
 			if (readTransformerMode()) {
 				const allKeys = [
@@ -1845,7 +1961,7 @@ export default function (pi: any) {
 			];
 			const lines = orderedKeys.map((k) => {
 				const rawText = lastSeenExtStatuses.get(k)?.trim();
-				const clean = rawText?.replace(/\x1b\[[0-9;]*m/g, "");
+				const clean = rawText ? stripAnsi(rawText) : undefined;
 				const parts: string[] = [];
 				if (userRules[k]?.hide) {
 					parts.push("hidden");
@@ -1908,15 +2024,11 @@ export default function (pi: any) {
 	pi.registerCommand("edr", {
 		description:
 			"Rewrite an extension status: /edr <key> <pattern> <replacement>; {1} {2}... = captured groups; quote args containing spaces",
-		handler: guardRuleCommands(async (args: string, ctx: any) => {
-			const parts = args.match(/("[^"]*"|\S+)/g) ?? [];
-			const unquote = (s: string) =>
-				s.length >= 2 && s[0] === '"' && s[s.length - 1] === '"'
-					? s.slice(1, -1)
-					: s;
-			const key = unquote(parts[0] ?? "");
-			const pattern = unquote(parts[1] ?? "");
-			const replacement = unquote(parts[2] ?? "");
+		handler: guardRuleCommands(async (args: string, ctx: PiCtx) => {
+			const parts = parseArgs(args);
+			const key = parts[0] ?? "";
+			const pattern = parts[1] ?? "";
+			const replacement = parts[2] ?? "";
 			if (!key || !pattern || replacement === undefined) {
 				ctx.ui.notify(
 					"Usage: /edr <key> <pattern> <replacement> — use {1} {2}... for captured groups; quote args containing spaces",
@@ -1954,16 +2066,16 @@ export default function (pi: any) {
 			// (which includes a previous user rule) instead of the default output
 			const rawText = lastSeenExtStatuses.get(key)?.trim();
 			if (rawText) {
-				const clean = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+				const clean = stripAnsi;
 				// default output = builtin transformer applied (if any)
 				let defaultText = rawText;
 				const builtinTf = tidyBuiltin[key];
-				if (builtinTf) {
+				if (builtinTf && lastTheme) {
 					try {
 						const r = builtinTf.transform(key, rawText, {
 							raw: rawText,
 							plain: clean(rawText),
-							theme: undefined as any,
+							theme: lastTheme,
 						});
 						if (typeof r === "string") defaultText = r;
 					} catch {
@@ -2002,12 +2114,12 @@ export default function (pi: any) {
 
 			const rules = readTransformRules();
 			rules[key] = { ...rules[key], rewrite: [pattern, replacement] };
-			writeTransformRules(rules);
-			if (enabled) applyFooter(ctx);
-			ctx.ui.notify(
-				`Rewrite set for ${key}: ${replacement || "<empty>"}`,
-				"info",
-			);
+			if (!writeTransformRules(rules)) {
+				ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+				return;
+			}
+			commitFooter(ctx);
+			ctx.ui.notify(`Rewrite set for ${key}: ${replacement || "<empty>"}`, "info");
 		}),
 	});
 
@@ -2037,23 +2149,29 @@ export default function (pi: any) {
 
 	pi.registerCommand("fcl", {
 		description: "Clear all pi-tidy-footer config for clean uninstall",
-		handler: async (_args: string, ctx: any) => {
+		handler: async (_args: string, ctx: PiCtx) => {
 			const result = resetAllConfig();
 			const mcpResult = removeMcpCompact();
 			if (!result.ok) {
 				ctx.ui.notify(`pi-tidy-footer: ${result.msg}`, "error");
 				return;
 			}
-			// remove user transformers (.ts files) — clean uninstall
+			// remove user transformers (.ts files) — clean uninstall.
+			// Guard: only delete the default dir (or a subdir of it); a user-set
+			// transformersDir pointing elsewhere must never be wiped.
 			const tfDir = readTransformersDir();
-			if (existsSync(tfDir)) {
+			const defaultDir = DEFAULT_TRANSFORMERS_DIR;
+			if (
+				existsSync(tfDir) &&
+				(tfDir === defaultDir || tfDir.startsWith(defaultDir + sep))
+			) {
 				try {
 					rmSync(tfDir, { recursive: true, force: true });
 				} catch (e) {
 					console.error("pi-tidy-footer: failed to remove transformers dir", e);
 				}
 			}
-			if (enabled) applyFooter(ctx);
+			commitFooter(ctx);
 			ctx.ui.notify(
 				`pi-tidy-footer: ${result.msg} ${mcpResult.msg} You can now uninstall the package.`,
 				mcpResult.ok ? "info" : "error",
@@ -2064,7 +2182,7 @@ export default function (pi: any) {
 	pi.registerCommand("edt", {
 		description:
 			"Manage transformer mode: on = user transformers take over (/ed frozen); off = return to /ed; d <key...> = disable transformer; e <key...> = enable; dir [path] = show/set user transformers dir; reload = re-read; no args = status",
-		handler: async (args: string, ctx: any) => {
+		handler: async (args: string, ctx: PiCtx) => {
 			const trimmed = args.trim();
 			if (!trimmed) {
 				ctx.ui.notify(
@@ -2077,8 +2195,11 @@ export default function (pi: any) {
 			const sub = parts[0];
 			const keys = parts.slice(1).filter(Boolean);
 			if (sub === "on") {
-				writeTransformerMode(true);
-				if (enabled) applyFooter(ctx);
+				if (!writeTransformerMode(true)) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
+				commitFooter(ctx);
 				ctx.ui.notify(
 					"Transformer mode: ON — user transformers take over extension display. /ed commands are frozen.",
 					"info",
@@ -2086,8 +2207,11 @@ export default function (pi: any) {
 				return;
 			}
 			if (sub === "off") {
-				writeTransformerMode(false);
-				if (enabled) applyFooter(ctx);
+				if (!writeTransformerMode(false)) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
+				commitFooter(ctx);
 				ctx.ui.notify(
 					"Transformer mode: OFF — /ed commands control extension display again.",
 					"info",
@@ -2109,17 +2233,17 @@ export default function (pi: any) {
 							disabled.add(k);
 							changed.push(k);
 						}
-					} else {
-						if (!disabled.has(k)) skipped.push(k);
-						else {
-							disabled.delete(k);
-							changed.push(k);
-						}
-					}
+					} else if (disabled.has(k)) {
+						disabled.delete(k);
+						changed.push(k);
+					} else skipped.push(k);
 				}
-				writeDisabledTransformerKeys([...disabled]);
+				if (!writeDisabledTransformerKeys([...disabled])) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
 				disabledTransformerKeys = disabled;
-				if (enabled) applyFooter(ctx);
+				commitFooter(ctx);
 				const changedMsg =
 					changed.length > 0
 						? `${sub === "d" ? "Disabled" : "Enabled"}: ${changed.join(", ")}`
@@ -2137,26 +2261,34 @@ export default function (pi: any) {
 			}
 			if (sub === "dir") {
 				if (keys.length === 0) {
-					ctx.ui.notify(
-						`User transformers dir: ${readTransformersDir()}`,
-						"info",
-					);
+					ctx.ui.notify(`User transformers dir: ${readTransformersDir()}`, "info");
 					return;
 				}
 				const newDir = keys.join(" ");
-				writeTransformersDir(newDir);
-				if (enabled) applyFooter(ctx);
+				if (!writeTransformersDir(newDir)) {
+					ctx.ui.notify("Save failed — config not persisted. See logs.", "error");
+					return;
+				}
+				commitFooter(ctx);
 				ctx.ui.notify(`User transformers dir set to: ${newDir}`, "info");
 				return;
 			}
 			if (sub === "reload") {
 				await ensureUserTfFile();
-				tidyBuiltin = await readTidyBuiltin();
-				tidyUser = await readTidyUser();
-				if (enabled) applyFooter(ctx);
+				const nb = await readTidyBuiltin();
+				const nu = await readTidyUser();
+				// on failure keep the previous transformers and surface the error
+				if (nb) tidyBuiltin = nb;
+				if (nu) tidyUser = nu;
+				commitFooter(ctx);
+				const failed = [nb ? null : "builtin", nu ? null : "user"]
+					.filter(Boolean)
+					.join(" + ");
 				ctx.ui.notify(
-					`Reloaded transformers: ${Object.keys(tidyBuiltin).length} builtin, ${Object.keys(tidyUser).length} user transformer(s).`,
-					"info",
+					failed
+						? `Reload failed for ${failed} — previous transformers kept.`
+						: `Reloaded transformers: ${Object.keys(tidyBuiltin).length} builtin, ${Object.keys(tidyUser).length} user transformer(s).`,
+					failed ? "error" : "info",
 				);
 				return;
 			}

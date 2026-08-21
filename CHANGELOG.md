@@ -2,15 +2,49 @@
 
 [中文](#中文)
 
-## [1.0.0] - 2026-07-31
+## [1.1.0] - 2026-08-21
+
+### Added
+
+- **`/ed` command family** — list, hide, show, rewrite and clear per-extension status display rules (`/ed` `/edh` `/eds` `/edr` `/edc`), plus one-key emoji hiding (`/ede`)
+- **Transformer system** — display tweaks split into a built-in layer (shipped, read-only) and a user layer (your own file, never overwritten by updates); user transformers override built-ins by key; managed via `/edt` (on/off, disable/enable, directory, hot reload)
+- **`/fcl` config reset** — clears all pi-tidy-footer config and restores the MCP footer setting for a clean uninstall
+
+### Changed
+
+- **`/ed` rule commands freeze in transformer mode** — when user transformers take over, the `/ed` rule commands are locked and a notice explains how to return
+
+### Improved
+
+- **Atomic config writes** — state is written to a temporary file and renamed into place, so a failed write can never leave a half-written config; the in-memory value is kept on failure
+- **Write failures are visible** — every command that saves config now reports "Save failed — config not persisted" instead of silently claiming success
+- **Corrupted state is preserved before reset** — a broken state file is backed up before config resets; first run (no file) stays silent
+- **Typed pi runtime usage** — the extension's use of the pi API is fully typed via local interfaces, replacing nearly all explicit `any`
+- **Self-check test suite** — assertions cover the pure display logic (git token parsing, rewrite rules, argument parsing, formatting, ANSI stripping) with zero dependencies
+- **CI preflight** — type check, tests and a packaging dry-run run before every publish
 
 ### Fixed
 
-- **Silent errors now logged** — all 4 previously no-op catch blocks (mergeState, refreshFx, fetchBalance, getApiKey) now emit `console.error("pi-tidy-footer:", …)`
-- **Threshold persistence regression** — readThresholds/readCostThresholds incorrectly read a non-existent nested key after the persistence refactor, silently falling back to defaults on restart
-- **Balance fetch optimistic timestamp** — balanceLastFetch was set before fetchBalance completed; a failed fetch now retries immediately instead of being blocked for 30s
-- **Network fetch timeout** — `refreshFx()` and `fetchBalance()` use `AbortSignal.timeout(5000)`, preventing permanently hung promises on network failure
-- **parseFloat crash path** — all 5 balance provider parse functions now use `Number(v) + Number.isFinite` instead of `parseFloat(v).toFixed(2)`, preventing TypeError on non-numeric API responses
+- **`/fcl` no longer deletes a user-configured transformers directory** — the recursive removal is restricted to the default directory (or a subdirectory of it), so a custom directory is never wiped
+- **Footer no longer degrades when a message lacks usage stats** — token sums now tolerate missing fields instead of throwing and collapsing the whole footer into the fallback line
+- **`/edt reload` keeps the previous transformers when reading fails** — a failed reload no longer silently clears every display tweak; the old ones stay active and an error is shown
+- **FX rates retry after a failed first fetch** — a one-off CDN failure no longer disables cost, balance and threshold display for the whole session; a recovery retry runs 60s later (empty payloads retry too)
+- **MCP compact injection is retried after failure** — the injection flag is only persisted on success, so a missing or corrupt mcp.json no longer leaves the verbose MCP status forever
+- **Transparent rewrites no longer swallow the trailing colour reset** — a rewrite rule matching across ANSI codes keeps the reset code after the match, so the following text keeps its intended colour
+- **`/edr` hints now match what the user actually sees** — the baseline check simulates built-in transformations with the real theme instead of checking against un-transformed text
+
+## [1.0.0] - 2026-07-31
+### Changed
+
+- **Balance cross-currency symbol mismatch fixed** — when FX data was unavailable, the balance display showed a wrong currency symbol (e.g. $12.34 for a CNY balance). Now hides the balance segment when FX rates are missing
+- **ccyRate returns undefined for missing rates** — non-USD currencies now return `undefined` instead of silently falling back to `0` when exchange rates are missing. Consumers show `--` or skip the display
+- **`/bs -d` argument parsing** — pure `-d` (no symbol) wrongly set the literal string "-d" as the active balance symbol. Now requires `-d <symbol>` with a space separator
+- **tool queue sliding window** — `minDisplayTimer` resets on every new tool completion, using a sliding 150ms window instead of a fixed one-shot timer
+- **Git status retry limit** — `runGitStatus` now bails after 3 consecutive failures, preventing tight-loop retries on a broken repository
+- **render() try-catch** — the entire render body is wrapped in try-catch; failures log to console and display a fallback line instead of breaking the footer
+- **FX TTL check moved to refreshFx entry** — previously only checked once on footer construction, now checks every `refreshFx()` call
+- **Unsued import** — removed dangling `AssistantMessage` import leftover from an earlier refactor
+
 
 ### Improved
 
@@ -24,16 +58,16 @@
 - **Extension status cache** — extension item list and MCP accent colour are now cached in a factory-scoped closure and rebuilt only when `getExtensionStatuses()` changes (detected via serialized comparison)
 - **Magic numbers extracted** — `FX_TTL_MS`, `GIT_TIMEOUT_MS`, `GIT_POLL_MS`, `BALANCE_COOLDOWN_MS`, `FETCH_TIMEOUT_MS`, `STATUS_MIN_MS`, `GIT_DEBOUNCE_MS` moved to named top-level constants
 
-### Changed
 
-- **Balance cross-currency symbol mismatch fixed** — when FX data was unavailable, the balance display showed a wrong currency symbol (e.g. $12.34 for a CNY balance). Now hides the balance segment when FX rates are missing
-- **ccyRate returns undefined for missing rates** — non-USD currencies now return `undefined` instead of silently falling back to `0` when exchange rates are missing. Consumers show `--` or skip the display
-- **`/bs -d` argument parsing** — pure `-d` (no symbol) wrongly set the literal string "-d" as the active balance symbol. Now requires `-d <symbol>` with a space separator
-- **tool queue sliding window** — `minDisplayTimer` resets on every new tool completion, using a sliding 150ms window instead of a fixed one-shot timer
-- **Git status retry limit** — `runGitStatus` now bails after 3 consecutive failures, preventing tight-loop retries on a broken repository
-- **render() try-catch** — the entire render body is wrapped in try-catch; failures log to console and display a fallback line instead of breaking the footer
-- **FX TTL check moved to refreshFx entry** — previously only checked once on footer construction, now checks every `refreshFx()` call
-- **Unsued import** — removed dangling `AssistantMessage` import leftover from an earlier refactor
+
+### Fixed
+
+- **Silent errors now logged** — all 4 previously no-op catch blocks (mergeState, refreshFx, fetchBalance, getApiKey) now emit `console.error("pi-tidy-footer:", …)`
+- **Threshold persistence regression** — readThresholds/readCostThresholds incorrectly read a non-existent nested key after the persistence refactor, silently falling back to defaults on restart
+- **Balance fetch optimistic timestamp** — balanceLastFetch was set before fetchBalance completed; a failed fetch now retries immediately instead of being blocked for 30s
+- **Network fetch timeout** — `refreshFx()` and `fetchBalance()` use `AbortSignal.timeout(5000)`, preventing permanently hung promises on network failure
+- **parseFloat crash path** — all 5 balance provider parse functions now use `Number(v) + Number.isFinite` instead of `parseFloat(v).toFixed(2)`, preventing TypeError on non-numeric API responses
+
 
 ## [0.8.0] - 2026-07-31
 
@@ -53,17 +87,18 @@
 - **MCP status compacted** — `servers` prefix removed from MCP display (`7 servers enabled` → `7 enabled`).
 
 ## [0.7.0] - 2026-07-25
-
-### Removed
-
-- **`/cd` cost toggle removed** — `readShowCost`/`writeShowCost` functions and `/cd` command deleted. Cost display now hard-wired on at end of stats line. Toggle introduced in 0.6.0 when only USD was available; multi-currency and auto fx rates eliminated the need.
-
 ### Changed
 
 - **`/cc` renamed to `/sc`** (switch currency), moved before `/bt` in command list; description updated to reflect it controls currency for both balance and cost display
 - Command order reorganized to `tf → sc → bt → ct → es → ew` for logical flow: toggle → currency → balance thresholds → cost thresholds → extension sort → extension wrap
 - `/bt` description reformatted to match `/ct` style: `"Balance thresholds (no args = show, <warn> <alert> = set, warn > alert)"`
 - `/ct` description pluralized from `"Cost threshold"` to `"Cost thresholds"` for consistency
+
+
+### Removed
+
+- **`/cd` cost toggle removed** — `readShowCost`/`writeShowCost` functions and `/cd` command deleted. Cost display now hard-wired on at end of stats line. Toggle introduced in 0.6.0 when only USD was available; multi-currency and auto fx rates eliminated the need.
+
 
 ## [0.6.1] - 2026-07-26
 
@@ -197,15 +232,49 @@
 
 ## 中文
 
-## [1.0.0] - 2026-07-31
+## [1.1.0] - 2026-08-21
+
+### 新增
+
+- **`/ed` 命令族** — 列出、隐藏、恢复、重写、清除单个扩展状态显示规则（`/ed` `/edh` `/eds` `/edr` `/edc`），外加一键 emoji 隐藏（`/ede`）
+- **Transformer 系统** — 显示微调拆分为内置层（随包发布、只读）与用户层（你自己的文件、更新永不覆盖）；用户 transformer 按 key 覆盖内置；通过 `/edt` 管理（on/off、禁用/启用、目录、热重载）
+- **`/fcl` 配置重置** — 清除全部 pi-tidy-footer 配置并还原 MCP footer 设置，干净卸载
+
+### 变更
+
+- **transformer 模式下 `/ed` 规则命令冻结** — 用户 transformer 接管后，`/ed` 规则命令被锁定，提示告知如何返回
+
+### 改进
+
+- **原子配置写入** — 状态先写临时文件再重命名，失败的写入不会留下半截配置；失败时内存保留旧值
+- **写入失败可见** — 所有保存配置的命令现在都报告 "Save failed — config not persisted"，不再静默宣称成功
+- **损坏状态先备份再重置** — 损坏的状态文件在重置前先备份；首次运行（无文件）保持静默
+- **pi 运行时类型化** — 扩展对 pi API 的使用通过本地接口完全类型化，消除了几乎所有显式 `any`
+- **自检测试套件** — 断言覆盖纯显示逻辑（git token 解析、重写规则、参数解析、格式化、ANSI 剥离），零依赖
+- **CI 预检** — 每次发布前执行类型检查、测试和打包预演
 
 ### 修复
 
-- **静默错误日志化** — 4 处原 `/* no-op */` catch（mergeState、refreshFx、fetchBalance、getApiKey）全部改为 `console.error("pi-tidy-footer:", …)`
-- **阈值持久化回归** — 持久化层重构后 readThresholds/readCostThresholds 读写了不存在的嵌套 key，重启后静默退回默认值
-- **余额 fetch 乐观时间戳** — balanceLastFetch 在 fetchBalance 完成前更新；失败的请求现在即刻重试，不再被 30s 阻塞
-- **网络 fetch 超时** — `refreshFx()` 和 `fetchBalance()` 使用 `AbortSignal.timeout(5000)`，防止网络故障时 Promise 永久挂起
-- **parseFloat 崩溃路径** — 5 个余额 provider 的 parse 函数改用 `Number(v) + Number.isFinite` 替代 `parseFloat(v).toFixed(2)`，防止 API 返回非数字字符串时抛出 TypeError
+- **`/fcl` 不再删除用户自定义的 transformer 目录** — 递归删除仅限默认目录（或其子目录），自定义目录不会被误删
+- **缺少 usage 统计时 footer 不再降级** — token 求和现在容忍缺失字段，不再抛错并把整个 footer 折叠成 fallback 行
+- **`/edt reload` 读取失败时保留旧 transformers** — 失败的重载不再静默清除所有显示微调；旧配置保持生效并显示错误提示
+- **FX 汇率首次拉取失败后会重试** — 一次性的 CDN 故障不再让成本、余额、阈值显示整场会话失效；60 秒后进行恢复重试（空响应同样重试）
+- **MCP compact 注入失败后会重试** — 注入标志仅在成功时持久化，mcp.json 缺失或损坏不再让冗长的 MCP 状态永久保留
+- **透明重写不再吞掉尾部颜色重置码** — 跨 ANSI 码匹配的重写规则保留匹配后的重置码，后续文本颜色保持正确
+- **`/edr` 提示与实际所见一致** — 基线检查用真实 theme 模拟内置转换，不再基于未转换文本给出误导提示
+
+## [1.0.0] - 2026-07-31
+### 变更
+
+- **余额跨货币符号串修复** — FX 数据缺失时余额显示错误的货币符号（如 CNY 余额显示 $12.34）。现在 FX 缺失时直接隐藏余额段
+- **ccyRate 缺失时返回 undefined** — 非 USD 货币缺汇率时不再静默兜底为 0，返回 undefined。消费端显示 `--` 或跳过
+- **`/bs -d` 参数解析** — 纯 `-d`（无符号名）将字面量 "-d" 设为当前余额符号。现要求 `-d <符号>`，以空格分隔
+- **工具队列滑动窗口** — `minDisplayTimer` 每次新工具完成时重置，用 150ms 滑动窗口替代一次性固定计时器
+- **Git status 重试上限** — `runGitStatus` 连续失败 3 次后放弃重试，防止损坏仓库上密集空转
+- **render() 异常保护** — render 主体包裹 try-catch；异常时控制台输出并返回 `["pi-tidy-footer: render failed"]`，防止 footer 消失
+- **FX TTL 检查移至 refreshFx 入口** — 原仅在 footer 构造时检查一次，改为每次 `refreshFx()` 调用时检查
+- **未使用的 import** — 移除重构遗留的 `AssistantMessage` import
+
 
 ### 改进
 
@@ -219,16 +288,16 @@
 - **扩展状态缓存** — extItems 和 MCP 强调色在闭包中缓存，仅在 `getExtensionStatuses()` 变化时重建（通过序列化字符串对比检测）
 - **魔法数字提取为常量** — `FX_TTL_MS`、`GIT_TIMEOUT_MS`、`GIT_POLL_MS`、`BALANCE_COOLDOWN_MS`、`FETCH_TIMEOUT_MS`、`STATUS_MIN_MS`、`GIT_DEBOUNCE_MS` 提取为文件顶部具名常量
 
-### 变更
 
-- **余额跨货币符号串修复** — FX 数据缺失时余额显示错误的货币符号（如 CNY 余额显示 $12.34）。现在 FX 缺失时直接隐藏余额段
-- **ccyRate 缺失时返回 undefined** — 非 USD 货币缺汇率时不再静默兜底为 0，返回 undefined。消费端显示 `--` 或跳过
-- **`/bs -d` 参数解析** — 纯 `-d`（无符号名）将字面量 "-d" 设为当前余额符号。现要求 `-d <符号>`，以空格分隔
-- **工具队列滑动窗口** — `minDisplayTimer` 每次新工具完成时重置，用 150ms 滑动窗口替代一次性固定计时器
-- **Git status 重试上限** — `runGitStatus` 连续失败 3 次后放弃重试，防止损坏仓库上密集空转
-- **render() 异常保护** — render 主体包裹 try-catch；异常时控制台输出并返回 `["pi-tidy-footer: render failed"]`，防止 footer 消失
-- **FX TTL 检查移至 refreshFx 入口** — 原仅在 footer 构造时检查一次，改为每次 `refreshFx()` 调用时检查
-- **未使用的 import** — 移除重构遗留的 `AssistantMessage` import
+
+### 修复
+
+- **静默错误日志化** — 4 处原 `/* no-op */` catch（mergeState、refreshFx、fetchBalance、getApiKey）全部改为 `console.error("pi-tidy-footer:", …)`
+- **阈值持久化回归** — 持久化层重构后 readThresholds/readCostThresholds 读写了不存在的嵌套 key，重启后静默退回默认值
+- **余额 fetch 乐观时间戳** — balanceLastFetch 在 fetchBalance 完成前更新；失败的请求现在即刻重试，不再被 30s 阻塞
+- **网络 fetch 超时** — `refreshFx()` 和 `fetchBalance()` 使用 `AbortSignal.timeout(5000)`，防止网络故障时 Promise 永久挂起
+- **parseFloat 崩溃路径** — 5 个余额 provider 的 parse 函数改用 `Number(v) + Number.isFinite` 替代 `parseFloat(v).toFixed(2)`，防止 API 返回非数字字符串时抛出 TypeError
+
 
 ## [0.8.0] - 2026-07-31
 
@@ -248,17 +317,18 @@
 - **MCP 状态精简** — 去除 MCP 显示中的 `servers` 字样（`7 servers enabled` → `7 enabled`）。
 
 ## [0.7.0] - 2026-07-25
-
-### 移除
-
-- **`/cd` 费用开关已移除** — 删除 `readShowCost`/`writeShowCost` 函数和 `/cd` 命令。费用现在始终在 stats 行末尾显示。该开关在 0.6.0 时期仅支持单币种 USD 时引入；多币种和自动汇率已消除此需求。
-
 ### 变更
 
 - **`/cc` 重命名为 `/sc`**（switch currency），移至 `/bt` 之前；描述更新为明确同时作用于余额和费用显示
 - 命令顺序调整为 `tf → sc → bt → ct → es → ew`，逻辑流：开关 → 币种 → 余额阈值 → 费用阈值 → 扩展排序 → 扩展换行
 - `/bt` 描述统一为 `/ct` 风格
 - `/ct` 描述从 `"Cost threshold"` 改为 `"Cost thresholds"`，统一复数形式
+
+
+### 移除
+
+- **`/cd` 费用开关已移除** — 删除 `readShowCost`/`writeShowCost` 函数和 `/cd` 命令。费用现在始终在 stats 行末尾显示。该开关在 0.6.0 时期仅支持单币种 USD 时引入；多币种和自动汇率已消除此需求。
+
 
 ## [0.6.1] - 2026-07-26
 
